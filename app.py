@@ -664,38 +664,6 @@ def home_page():
             vee_avatar=vee_avatar,
         )
 
-    # Divider between Vee's introduction and the explore section
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-    # Dark background around the whole explore section
-    with st.container(key="explore_section"):
-        # Heading with a small pill label, a big title, and a short intro line
-        with st.container(key="explore_heading"):
-            st.markdown(
-                '<div class="explore-pill">AI tools for small business</div>'
-                '<div class="explore-title">What <span class="vee-gradient">Vee</span> can help you explore</div>'
-                '<p class="explore-subtitle">Browse the AI tools in our catalog by the job you need done, '
-                'then compare them to find a good fit for your business.</p>',
-                unsafe_allow_html=True,
-            )
-
-        card_columns = st.columns(3)
-        for column, card in zip(card_columns, EXPLORE_CARDS):
-            with column:
-                with st.container(key=f"explore_card_{card['key']}"):
-                    show_explore_card(card)
-        if st.session_state.get("vee_explore_suggestion"):
-            st.info(
-                "Ask Vee about " + st.session_state["vee_explore_suggestion"].lower()
-                + ". The conversation is at the top of this page."
-            )
-        st.caption(
-            f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
-        )
-
-    # Divider between the explore section and Find my tools
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
     # Vee is the only recommendation intake; the old dropdown quiz is retired.
     # Show the optional ROI calculator only after an owner has finished speaking to Vee.
     vee_state = st.session_state.get("vee_guided", {})
@@ -742,6 +710,43 @@ def home_page():
             "and changes in demand. Use the provider price and your own measured results "
             "before making a decision."
         )
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("### Browse the complete catalog")
+    st.write("Want to see every researched AI tool, not just Vee's top recommendations?")
+    st.link_button("Show All Tools", "./catalog", type="primary")
+
+    # Optional exploration cards after Vee, ROI, and the full-catalog action
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    # Dark background around the whole explore section
+    with st.container(key="explore_section"):
+        # Heading with a small pill label, a big title, and a short intro line
+        with st.container(key="explore_heading"):
+            st.markdown(
+                '<div class="explore-pill">AI tools for small business</div>'
+                '<div class="explore-title">What <span class="vee-gradient">Vee</span> can help you explore</div>'
+                '<p class="explore-subtitle">Browse the AI tools in our catalog by the job you need done, '
+                'then compare them to find a good fit for your business.</p>',
+                unsafe_allow_html=True,
+            )
+
+        card_columns = st.columns(3)
+        for column, card in zip(card_columns, EXPLORE_CARDS):
+            with column:
+                with st.container(key=f"explore_card_{card['key']}"):
+                    show_explore_card(card)
+        if st.session_state.get("vee_explore_suggestion"):
+            st.info(
+                "Ask Vee about " + st.session_state["vee_explore_suggestion"].lower()
+                + ". The conversation is at the top of this page."
+            )
+        st.caption(
+            f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
+        )
+
+    # Divider between the explore section and Find my tools
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
     # Divider before Free help
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)

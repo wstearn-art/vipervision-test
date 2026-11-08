@@ -338,7 +338,40 @@ def _style_vee():
     """, unsafe_allow_html=True)
 
 
-def _result_card(item, number, people, cross_industry):
+def _owner_benefit(tool, answers):
+    """Ground a possible owner benefit in the researched catalog's job category.
+
+    This is deterministic (zero API calls), and intentionally not a performance claim.
+    """
+    job = str(tool.get("challenge", "")).casefold()
+    business = str(answers.get("business") or "business").strip()
+    goal = str(answers.get("goal") or answers.get("challenge") or "your goal").strip()
+    benefit = {
+        "marketing": "draft and test marketing messages or campaigns",
+        "social media": "prepare social posts and promotional content",
+        "reviews": "respond to online reviews more consistently",
+        "customer questions": "handle incoming questions and capture customer inquiries",
+        "bookings": "reduce manual appointment coordination",
+        "scheduling": "organize calendars or employee schedules",
+        "accounting": "reduce manual bookkeeping tasks",
+        "daily operations": "support repetitive day-to-day work",
+        "estimating": "prepare property measurements for estimating",
+        "landscape design": "create visual concepts to discuss with customers",
+    }.get(job, "support a business workflow")
+    return (f"For your {business}, this tool may help you {benefit}. "
+            f"Your stated priority is: {goal}. "
+            "Confirm the listed features actually support that goal before committing.")
+
+
+def _send_guided_followup(state, prompt, ranked):
+    """Process only a deliberately clicked follow-up, using the existing AI call."""
+    state["messages"].append({"role": "user", "content": prompt})
+    response = _followup(state, prompt, ranked)
+    state["messages"].append({"role": "assistant", "content": response})
+    st.rerun()
+
+
+def _result_card(item, number, people, cross_industry, answers, state, ranked):
     """Friendly catalog-grounded overview, never an AI-invented product description."""
     tool = item["tool"]
     with st.container(key=f"vee_result_{number}"):
@@ -350,7 +383,9 @@ def _result_card(item, number, people, cross_industry):
             st.metric("Catalog fit", f"{item['score']}/6", help="Job fit 3, price fit 2, effort fit 1. This does not measure industry suitability.")
         st.markdown("**Published pricing**")
         st.write(str(tool["price_note"]).replace("$", "\\$"))
-        st.markdown("**Why consider it**")
+        st.markdown("**How it could help you**")
+        st.write(_owner_benefit(tool, answers))
+        st.markdown("**Catalog-researched advantages**")
         st.write(str(tool["pros"]))
         st.markdown("**Before committing**")
         st.write(str(tool["cons"]))
@@ -372,6 +407,22 @@ def _result_card(item, number, people, cross_industry):
         source = str(tool.get("source", ""))
         if source and source != "nan":
             st.caption(f"Catalog source: {source} · Research snapshot, not live verification")
+        more, implement = st.columns(2)
+        name = str(tool["tool_name"])
+        with more:
+            if st.button("Learn more", key=f"vee_more_{number}", use_container_width=True):
+                _send_guided_followup(
+                    state,
+                    f"Tell me more about {name}: its advantages, limitations, and how it could help my stated goal. Only use catalog facts for product claims.",
+                    ranked,
+                )
+        with implement:
+            if st.button("How to get started", key=f"vee_implement_{number}", use_container_width=True):
+                _send_guided_followup(
+                    state,
+                    f"Help me implement {name} for my business. Give me a practical first-week checklist, and flag steps or integrations the catalog cannot verify.",
+                    ranked,
+                )
 
 
 def render_vee_chat(
@@ -440,10 +491,17 @@ def render_vee_chat(
                         "Ask Vee what to consider next, or start a new conversation.")
             else:
                 for index, item in enumerate(ranked[:3], start=1):
-                    _result_card(item, index, a["employees"], cross_industry)
+                    _result_card(item, index, a["employees"], cross_industry, a, state, ranked)
                 st.caption("Catalog details are research snapshots, not live pricing or proof of "
                            "suitability. Verify current plans, seats and capabilities with the provider.")
-        st.caption("Ask Vee a follow-up about your business or these recommendations.")
+        st.caption("Want more details about a tool or help putting it into practice? Use the buttons above, or ask Vee below.")
+        if ranked and st.button("Ask Vee to compare these options", key="vee_ask_compare"):
+            names = ", ".join(str(x["tool"]["tool_name"]) for x in ranked[:3])
+            _send_guided_followup(
+                state,
+                f"Compare {names} for my business goal, explaining the main trade-offs using only verified catalog facts.",
+                ranked,
+            )
         if st.button("Start a new conversation", key="vee_restart"):
             st.session_state.vee_guided = _state()
             st.rerun()
