@@ -244,7 +244,14 @@ def _done_message(state):
         "Do not claim there is a match before checking the catalog."
     )
     ai = _call_ai(system, [{"role": "user", "content": json.dumps(a, ensure_ascii=False, default=str)}], max_tokens=85)
-    return ai or f"Thanks, {a.get('name', 'there')}! Let's see what our researched catalog can support."
+    intro = ai or f"Thanks, {a.get('name', 'there')}! Let's see what our researched catalog can support."
+    # This guidance is deterministic: no extra tokens or unverified promises.
+    next_steps = (
+        "Once you've reviewed the options, I can explain a tool's benefits and "
+        "pros and cons, compare the choices, or help you plan the setup. "
+        "You can also try the ROI calculator below to estimate potential value."
+    )
+    return intro.rstrip() + "\n\n" + next_steps
 
 
 def _followup(state, user_message, ranked):
@@ -441,28 +448,54 @@ def _result_card(item, number, people, cross_industry, answers, state, ranked):
         source = str(tool.get("source", ""))
         if source and source != "nan":
             st.caption(f"Catalog source: {source} · Research snapshot, not live verification")
-        more, implement = st.columns(2)
-        name = str(tool["tool_name"])
-        with more:
-            if st.button("Explore benefits", key=f"vee_more_{number}", use_container_width=True):
-                _send_guided_followup(
-                    state,
-                    f"Tell me more about {name}: its advantages, limitations, and how it could help my stated goal. Only use catalog facts for product claims.",
-                    ranked, source_key=f"tool_{number}",
-                )
-        with implement:
-            if st.button("Get setup guidance", key=f"vee_implement_{number}", use_container_width=True):
-                _send_guided_followup(
-                    state,
-                    f"Help me implement {name} for my business. Give me a practical first-week checklist, and flag steps or integrations the catalog cannot verify.",
-                    ranked, source_key=f"tool_{number}",
-                )
-        inline_reply = st.session_state.get("vee_inline_followup")
-        if inline_reply and inline_reply.get("source") == f"tool_{number}":
-            with st.container(border=True):
-                st.markdown("**Vee's answer**")
-                st.markdown(inline_reply["response"])
-                st.caption("This response is also saved in your conversation above.")
+        # Each action is a Streamlit fragment. Only this card section updates
+        # after a click, so the page does not jump back to the conversation.
+        _tool_followup_actions(number, str(tool["tool_name"]), state, ranked)
+
+
+@st.fragment
+def _tool_followup_actions(number, name, state, ranked):
+    """Keep the reply next to the chosen tool without a whole-page rerun."""
+    more, implement = st.columns(2)
+    with more:
+        if st.button("Explore benefits & trade-offs", key=f"vee_more_{number}", use_container_width=True):
+            _send_guided_followup(
+                state,
+                f"Explain the benefits, pros and cons of {name} for my business goal. "
+                "Use only catalog facts for product claims and separate possibilities from verified features.",
+                ranked, source_key=f"tool_{number}",
+            )
+    with implement:
+        if st.button("How to get started", key=f"vee_implement_{number}", use_container_width=True):
+            _send_guided_followup(
+                state,
+                f"Help me implement {name} for my business. Give a concise, practical "
+                "first-week checklist and flag integrations or steps the catalog cannot verify.",
+                ranked, source_key=f"tool_{number}",
+            )
+    inline_reply = st.session_state.get("vee_inline_followup")
+    if inline_reply and inline_reply.get("source") == f"tool_{number}":
+        with st.container(border=True):
+            st.markdown("**Vee's answer**")
+            st.markdown(inline_reply["response"])
+            st.caption("You can keep chatting with Vee above, too.")
+
+
+@st.fragment
+def _compare_followup_actions(state, ranked):
+    if st.button("Ask Vee to compare these options", key="vee_ask_compare"):
+        names = ", ".join(str(x["tool"]["tool_name"]) for x in ranked[:3])
+        _send_guided_followup(
+            state,
+            f"Compare {names} for my business goal, explaining the main trade-offs "
+            "using only verified catalog facts.",
+            ranked, source_key="comparison",
+        )
+    inline_comparison = st.session_state.get("vee_inline_followup")
+    if inline_comparison and inline_comparison.get("source") == "comparison":
+        with st.container(border=True):
+            st.markdown("**Vee's comparison**")
+            st.markdown(inline_comparison["response"])
 
 
 def render_vee_chat(
@@ -560,18 +593,8 @@ def render_vee_chat(
                 st.caption("Catalog details are research snapshots, not live pricing or proof of "
                            "suitability. Verify current plans, seats and capabilities with the provider.")
         st.caption("Want more details about a tool or help putting it into practice? Use the buttons above, or message Vee in the chat above.")
-        if ranked and st.button("Ask Vee to compare these options", key="vee_ask_compare"):
-            names = ", ".join(str(x["tool"]["tool_name"]) for x in ranked[:3])
-            _send_guided_followup(
-                state,
-                f"Compare {names} for my business goal, explaining the main trade-offs using only verified catalog facts.",
-                ranked, source_key="comparison",
-            )
-        inline_comparison = st.session_state.get("vee_inline_followup")
-        if inline_comparison and inline_comparison.get("source") == "comparison":
-            with st.container(border=True):
-                st.markdown("**Vee's comparison**")
-                st.markdown(inline_comparison["response"])
+        if ranked:
+            _compare_followup_actions(state, ranked)
         if st.button("Start a new conversation", key="vee_restart"):
             st.session_state.vee_guided = _state()
             st.session_state.pop("vee_inline_followup", None)
