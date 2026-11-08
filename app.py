@@ -631,7 +631,82 @@ def home_page():
         + '</div>',
         unsafe_allow_html=True,
     )
+# FRONT PAGE — ASK VEE AI
+    with st.container(border=True):
+        st.subheader("🐍 Ask Vee AI")
+        st.write(
+            "Tell me what's challenging your business, "
+            "and I'll help you discover AI tools that fit your needs."
+        )
 
+        with st.form("home_vee_form"):
+            vee_business = st.selectbox(
+                "What type of business do you run?",
+                BUSINESS_TYPES,
+                key="home_vee_business"
+            )
+
+            vee_question = st.text_area(
+                "What's your biggest business challenge?",
+                placeholder=(
+                    "Example: I keep missing customer calls "
+                    "while working and need help booking appointments."
+                ),
+                key="home_vee_question"
+            )
+
+            vee_budget = st.selectbox(
+                "What's your monthly budget?",
+                BUDGET_OPTIONS,
+                key="home_vee_budget"
+            )
+
+            vee_comfort = st.selectbox(
+                "How comfortable are you with technology?",
+                COMFORT_OPTIONS,
+                key="home_vee_comfort"
+            )
+
+            ask_vee = st.form_submit_button(
+                "Ask Vee",
+                type="primary"
+            )
+
+        if ask_vee:
+            if not vee_question.strip():
+                st.warning("Tell Vee what you need help with.")
+            else:
+                ai_job = ai_job_from_text(vee_question)
+                matched_job = ai_job or job_from_text(vee_question)
+
+                if matched_job is None:
+                    st.warning(
+                        "I couldn't identify a matching business "
+                        "challenge. Try describing the problem differently."
+                    )
+                    st.session_state.pop("home_vee_answer", None)
+                else:
+                    st.session_state["home_vee_answer"] = {
+                        "business": vee_business,
+                        "job": matched_job,
+                        "budget": vee_budget,
+                        "comfort": vee_comfort,
+                        "text": vee_question.strip(),
+                        "typed": True,
+                        "understood": True,
+                        "ai_used": ai_job is not None,
+                    }
+
+        if "home_vee_answer" in st.session_state:
+            answer = st.session_state["home_vee_answer"]
+
+            if answer["ai_used"]:
+                st.caption("OpenRouter AI interpreted your request.")
+            else:
+                st.caption("Used keyword matching as a fallback.")
+
+            show_chat_answer(answer)
+    
     # Division between header and the rest of the page
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
