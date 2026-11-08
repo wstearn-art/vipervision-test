@@ -611,7 +611,6 @@ st.markdown("""
     <div class="nav-logo">VipervisionAI</div>
     <div class="nav-links">
         <a href="./" target="_self">Home</a>
-        <a href="./#chat-with-vee" target="_self">Chat with Vee</a>
         <a href="./catalog" target="_self">Catalog</a>
         <a href="./about" target="_self">About the Website</a>
         <a href="./#about-the-creators" target="_self">About the Creators</a>
@@ -664,14 +663,10 @@ def home_page():
             vee_avatar=vee_avatar,
         )
 
-    # Vee is the only recommendation intake; the old dropdown quiz is retired.
-    vee_state = st.session_state.get("vee_guided", {})
-    if vee_state.get("stage") == "done":
-        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-        # Keep the interactive ROI tool readable on large desktop displays.
-        roi_left, roi_center, roi_right = st.columns([1, 3, 1])
-        with roi_center:
-            with st.container(border=True):
+        # Once the first chat with Vee is done, the ROI calculator shows right under it
+        vee_state = st.session_state.get("vee_guided", {})
+        if vee_state.get("stage") == "done":
+            with st.container(border=True, key="vee_roi"):
                 st.subheader("Is it worth it? Estimate your ROI")
                 st.caption("Illustrative estimate, not a promised saving. Use your own numbers.")
 
@@ -890,14 +885,6 @@ def about_page():
 
     # Your original dropdowns, styled the same as the questions above
     with st.container(key="about_faq_more"):
-        # Single conversational entrypoint; no second dropdown-based Vee interface.
-        with st.expander("Ask Vee in chat"):
-            st.write(
-                "Chat with Vee on the homepage. Describe your business problem in your "
-                "own words; Vee will discuss it and show relevant catalog-based candidates."
-            )
-            st.markdown("[Go to Chat with Vee](./#chat-with-vee)")
-
         # Research and methodology
         with st.expander("Research and scoring method"):
             st.write(
