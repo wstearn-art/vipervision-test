@@ -90,23 +90,6 @@ def _call_ai(system, user_messages, *, max_tokens=180):
     return None
 
 
-def _show_ai_diagnostics():
-    """Temporary troubleshooting panel; no extra requests and no conversation logs."""
-    with st.expander("AI connection diagnostics (testing)", expanded=False):
-        diag = st.session_state.get("vee_api_diagnostics", {})
-        st.write(f"**Vee chat OpenRouter calls:** {diag.get('attempts', 0)}")
-        st.write(f"**Successful:** {diag.get('successes', 0)} · "
-                 f"**Fallback / failed:** {diag.get('failures', 0)}")
-        last = diag.get("last_status", "No call attempted in this session")
-        http = diag.get("last_http_status")
-        st.write("**Last result:** " + last + (f" (HTTP {http})" if http else ""))
-        st.write(f"**Reported tokens:** {diag.get('input_tokens', 0)} input, "
-                 f"{diag.get('output_tokens', 0)} output")
-        st.caption("Counts are for Vee's direct AI calls in this browser session. "
-                   "The classifier in app.py is not included. Token counts depend on "
-                   "what the API reports. No keys or chat text are displayed or stored here.")
-
-
 def _number_of_people(message):
     lower = message.lower()
     if re.search(r"\b(just me|only me|myself|solo)\b", lower):
@@ -415,7 +398,6 @@ def render_vee_chat(
     _style_vee()
     st.subheader("🐍 Chat with Vee")
     st.caption("Tell Vee what you're trying to improve. She'll ask a few useful questions and find catalog-based options.")
-    _show_ai_diagnostics()
 
     for message in state["messages"]:
         with st.chat_message(message["role"], avatar=vee_avatar() if message["role"] == "assistant" else None):
