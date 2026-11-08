@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import requests
-from vee_chat import render_vee_chat
+from vee_chat import render_vee_chat, catalog_tool_commentary
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
     page_icon="🔍",
@@ -611,6 +611,7 @@ st.markdown("""
     <div class="nav-logo">VipervisionAI</div>
     <div class="nav-links">
         <a href="./" target="_self">Home</a>
+        <a href="./#chat-with-vee" target="_self">Chat with Vee</a>
         <a href="./catalog" target="_self">Catalog</a>
         <a href="./about" target="_self">About the Website</a>
         <a href="./#about-the-creators" target="_self">About the Creators</a>
@@ -663,10 +664,14 @@ def home_page():
             vee_avatar=vee_avatar,
         )
 
-        # Once the first chat with Vee is done, the ROI calculator shows right under it
-        vee_state = st.session_state.get("vee_guided", {})
-        if vee_state.get("stage") == "done":
-            with st.container(border=True, key="vee_roi"):
+    # Vee is the only recommendation intake; the old dropdown quiz is retired.
+    vee_state = st.session_state.get("vee_guided", {})
+    if vee_state.get("stage") == "done":
+        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+        # Keep the interactive ROI tool readable on large desktop displays.
+        roi_left, roi_center, roi_right = st.columns([1, 3, 1])
+        with roi_center:
+            with st.container(border=True):
                 st.subheader("Is it worth it? Estimate your ROI")
                 st.caption("Illustrative estimate, not a promised saving. Use your own numbers.")
 
@@ -756,6 +761,9 @@ def home_page():
         st.caption(
             f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
         )
+
+    # Divider between the explore section and Find my tools
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
     # Divider before Free help
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
@@ -882,6 +890,14 @@ def about_page():
 
     # Your original dropdowns, styled the same as the questions above
     with st.container(key="about_faq_more"):
+        # Single conversational entrypoint; no second dropdown-based Vee interface.
+        with st.expander("Ask Vee in chat"):
+            st.write(
+                "Chat with Vee on the homepage. Describe your business problem in your "
+                "own words; Vee will discuss it and show relevant catalog-based candidates."
+            )
+            st.markdown("[Go to Chat with Vee](./#chat-with-vee)")
+
         # Research and methodology
         with st.expander("Research and scoring method"):
             st.write(
@@ -1072,6 +1088,23 @@ def about_page():
             )
 
 
+
+@st.fragment
+def catalog_vee_comment(tool):
+    """Show an opt-in AI assessment inside the selected catalog card."""
+    name = str(tool["tool_name"])
+    key = "catalog_vee_comment_" + re.sub(r"[^a-z0-9]+", "_", name.lower())
+    if st.button("Ask Vee about this tool", key="ask_" + key):
+        if key not in st.session_state:
+            with st.spinner(f"Vee is reviewing {name}..."):
+                st.session_state[key] = catalog_tool_commentary(tool)
+    if key in st.session_state:
+        with st.container(border=True):
+            st.markdown("**Vee's take**")
+            st.markdown(st.session_state[key])
+            st.caption("Based on catalog research, not live product verification. Check the provider before buying.")
+
+
 # Catalog page: the full list of tools on its own page
 def catalog_page():
     # Catalog
@@ -1081,7 +1114,8 @@ def catalog_page():
         f"{PRICE_CHECK_DATE}. Provider prices and terms can change."
     )
     search_text = st.text_input(
-        "Search the database",
+        "Search the catalog",
+        placeholder="For example: schedule, reviews, Square",
     )
     catalog_col1, catalog_col2, catalog_col3 = st.columns([1, 1, 1])
     with catalog_col1:
@@ -1114,16 +1148,22 @@ def catalog_page():
     st.caption(f"Showing {len(shown)} catalog tools.")
     if shown.empty:
         st.info("No catalog tools match those filters. Clear the search or a filter to see more.")
-    for card_number, (_, tool) in enumerate(shown.iterrows()):
-        with st.container(key=f"catalog_card_{card_number}"):
+    for _, tool in shown.iterrows():
+        with st.container(border=True):
             st.markdown(f"#### {tool['tool_name']}")
             st.write(f"**Job:** {tool['challenge']}  |  **Business:** {tool['business_type']}")
             st.write(f"**Price:** {md(tool['price_note'])}  |  **Setup:** {tool['effort']}")
             st.write(f"**What it does well:** {md(tool['pros'])}")
             st.write(f"**What to check:** {md(tool['cons'])}")
-            show_tool_link(tool["website"])
-            st.caption(f"Price checked {date_label(tool['checked_date'])}.")
-            st.markdown(f"[Source details](https://{tool['source']})")
+            link_col, advice_col = st.columns([1, 1])
+            with link_col:
+                show_tool_link(tool["website"], str(tool["tool_name"]))
+            with advice_col:
+                catalog_vee_comment(tool)
+            st.caption(
+                f"Price checked {date_label(tool['checked_date'])} · "
+                f"Source: {tool['source']} · Prices and features may change."
+            )
 
     # Comparison
     st.header("Compare up to three tools")
