@@ -581,8 +581,7 @@ def show_explore_card(card):
         unsafe_allow_html=True,
     )
     if st.button(card["button"] + " \u2192", key=f"explore_{card['key']}", use_container_width=True):
-        st.session_state["explore_job"] = card["quiz_job"]
-        st.session_state["quiz_job_select"] = card["quiz_job"]
+        st.session_state["vee_explore_suggestion"] = card["title"]
     st.markdown(
         f'<div class="card-metrics">'
         f'<div><div class="metric-label">Tools</div><div class="metric-value">{len(matches)}</div></div>'
@@ -608,7 +607,7 @@ st.markdown("""
     <div class="nav-logo">VipervisionAI</div>
     <div class="nav-links">
         <a href="./" target="_self">Home</a>
-        <a href="./#find-my-tools" target="_self">Find my tools</a>
+        <a href="./#chat-with-vee" target="_self">Chat with Vee</a>
         <a href="./catalog" target="_self">Catalog</a>
         <a href="./about" target="_self">About the Website</a>
         <a href="./#about-the-creators" target="_self">About the Creators</a>
@@ -635,6 +634,7 @@ def home_page():
     # Division between header and the rest of the page
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
+    st.markdown('<div id="chat-with-vee"></div>', unsafe_allow_html=True)
     vee_col, greet_col = st.columns([1, 2])
     with vee_col:
         # Container key lets style.css add Vee's border
@@ -680,6 +680,11 @@ def home_page():
             with column:
                 with st.container(key=f"explore_card_{card['key']}"):
                     show_explore_card(card)
+        if st.session_state.get("vee_explore_suggestion"):
+            st.info(
+                "Ask Vee about " + st.session_state["vee_explore_suggestion"].lower()
+                + ". The conversation is at the top of this page."
+            )
         st.caption(
             f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
         )
@@ -687,135 +692,17 @@ def home_page():
     # Divider between the explore section and Find my tools
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-    # Recommendation questionnaire
-    # Brown box around the whole Find my tools section
-    with st.container(key="find_tools_section"):
-        st.header("Find my tools")
-        st.write(
-            "Choose the answers that best describe your business. "
-            "The score is a rule based fit guide, not a customer rating."
-        )
-
-        with st.form("recommendation_form"):
-            with st.container(key="question_card_business"):
-                st.write("**1. What type of business do you operate?**")
-                business_type = st.selectbox(
-                    "Business type",
-                    BUSINESS_TYPES,
-                    label_visibility="collapsed",
-                )
-            with st.container(key="question_card_challenge"):
-                st.write("**2. What is your biggest business challenge?**")
-                job = st.selectbox("Business challenge", JOBS, key="quiz_job_select", label_visibility="collapsed")
-            with st.container(key="question_card_budget"):
-                st.write("**3. What is your budget for AI tools?**")
-                budget_label = st.selectbox(
-                    "Monthly budget",
-                    BUDGET_OPTIONS,
-                    label_visibility="collapsed",
-                )
-            with st.container(key="question_card_employees"):
-                st.write("**4. How many employees do you have?**")
-                employees = st.slider(
-                    "Number of employees",
-                    1,
-                    50,
-                    1,
-                    label_visibility="collapsed",
-                )
-            with st.container(key="question_card_tech"):
-                st.write("**5. How comfortable are you with technology?**")
-                comfort = st.selectbox(
-                    "Technology comfort",
-                    COMFORT_OPTIONS,
-                    label_visibility="collapsed",
-                )
-            systems = st.text_input(
-                "Optional: systems you already use, such as a point of sale or a spreadsheet",
-                help="This is added to your first week checklist. It does not change the score.",
-            )
-            submitted = st.form_submit_button("Find my tools", type="primary")
-
-    if submitted:
-        st.session_state["recommendation_results"] = {
-            "business_type": business_type,
-            "job": job,
-            "budget_label": budget_label,
-            "employees": employees,
-            "comfort": comfort,
-            "systems": systems,
-        }
-
-    if "recommendation_results" in st.session_state:
-        result = st.session_state["recommendation_results"]
-        pool = business_tools(tools, result["business_type"])
-        ranked = score_tools(
-            pool,
-            result["job"],
-            BUDGET_CAP[result["budget_label"]],
-            result["comfort"],
-        )
-        st.subheader("Your best matching tools")
-        st.write(
-            f"Matched to {result['business_type']} and {result['job']}, "
-            f"for a team of {result['employees']}."
-        )
-        st.info(
-            "How the score works: job fit is worth 3 points, price fit is worth "
-            "2 points, and effort fit is worth 1 point. Equal scores are listed "
-            "alphabetically. A score is not a review or a guarantee of results."
-        )
-        if not ranked:
-            st.warning(
-                "No catalog tools are listed for this job and business type. "
-                "Try another job to explore the current catalog."
-            )
-        else:
-            if len(ranked) < 3:
-                st.caption(
-                    f"The catalog has {len(ranked)} tool"
-                    f"{'' if len(ranked) == 1 else 's'} for this job and business type. "
-                    "We do not fill the list with tools for other jobs."
-                )
-            for index, item in enumerate(ranked[:3], start=1):
-                with st.container(border=True):
-                    show_tool_result(item, index, result["employees"])
-            st.download_button(
-                "Download your shortlist",
-                data=shortlist_csv(ranked),
-                file_name="vipervision_shortlist.csv",
-                mime="text/csv",
-            )
-            show_first_week_plan(ranked[0]["tool"], result.get("systems", ""))
-            show_starter_stack(
-                pool, result["budget_label"], result["comfort"], result["job"]
-            )
-        st.button("Clear my results", on_click=clear_results)
-
-    # The ROI calculator only shows up after someone clicks Find my tools
-    if "recommendation_results" in st.session_state:
+    # Vee is the only recommendation intake; the old dropdown quiz is retired.
+    # Show the optional ROI calculator only after an owner has finished speaking to Vee.
+    vee_state = st.session_state.get("vee_guided", {})
+    if vee_state.get("stage") == "done":
         # Return on investment calculator
         st.header("Is it worth it? ROI calculator")
         st.write(
             "Use your own estimates to explore a possible return. "
             "The time reduction is an assumption, not a measured result."
         )
-        st.selectbox(
-            "Optional: fill the tool price from a catalog tool",
-            ["My own number"] + tools["tool_name"].tolist(),
-            key="roi_tool",
-            on_change=fill_roi_price,
-        )
-        roi_choice = st.session_state.get("roi_tool", "My own number")
-        if roi_choice != "My own number":
-            roi_row = tools[tools["tool_name"] == roi_choice].iloc[0]
-            if pd.isna(roi_row["monthly_cost"]):
-                st.caption(f"{roi_choice} is quote only, so enter your own price below.")
-            elif pd.notna(roi_row["free_price"]) and roi_row["free_price"] == 0:
-                st.caption(
-                    f"The slider uses the paid plan price for {roi_choice}. It also has a "
-                    "free starting option, so set the slider to 0 to test the free plan."
-                )
+        st.caption("Enter a price from Vee's recommendations or your own estimate below.")
         hours = st.slider("Hours per week spent on this task", 0, 40, 5)
         value = st.slider("Value of your time, dollars per hour", 10, 100, 25)
         reduction = st.slider("Assumed time reduction, percent", 0, 80, 30)
@@ -887,10 +774,10 @@ def home_page():
         with st.container(key="about_website"):
             st.header("About the Website")
             st.write(
-                "VipervisionAI helps restaurants and coffee shops discover, compare, "
-                "and explore adoption steps for AI tools. It includes a searchable catalog, "
-                "a transparent rule based fit recommender, comparison, and an ROI estimate. "
-                "It is not an AI picker and does not claim to deploy tools."
+                "VipervisionAI helps small businesses discuss problems with Vee, discover "
+                "catalog-grounded AI tool candidates, compare options, and estimate ROI. "
+                "We distinguish researched catalog details from unverified suitability. "
+                "The site does not purchase or deploy tools."
             )
     with about_creators_col:
         with st.container(key="about_creators"):
@@ -936,8 +823,8 @@ def about_page():
         with st.expander("What does VipervisionAI do?"):
             st.write(
                 "It helps restaurants and coffee shops discover, compare, and plan how to "
-                "adopt AI tools. You answer five questions, and the site shows your best "
-                "matching tools from our catalog with the reasons they matched."
+                "adopt AI tools. Chat with Vee to discuss a problem and see catalog-grounded "
+                "candidates with reasons and limitations."
             )
         with st.expander("How does the fit score work?"):
             st.write(
@@ -977,47 +864,13 @@ def about_page():
 
     # Your original dropdowns, styled the same as the questions above
     with st.container(key="about_faq_more"):
-        # Chat helper uses the same deterministic scoring rules
+        # Single conversational entrypoint; no second dropdown-based Vee interface.
         with st.expander("Ask Vee in chat"):
             st.write(
-                "I use the same catalog and scoring rules as the questionnaire. "
-                "I do not invent tools, prices, or reviews."
+                "Chat with Vee on the homepage. Describe your business problem in your "
+                "own words; Vee will discuss it and show relevant catalog-based candidates."
             )
-            chat_business = st.selectbox(
-                "What type of business do you run?",
-                BUSINESS_TYPES,
-                key="chat_business",
-            )
-            chat_job = st.selectbox("What is your top job?", JOBS, key="chat_job")
-            chat_text = st.text_input(
-                "Or type what you need help with (optional)",
-                key="chat_text",
-                placeholder="For example: I need help with staff schedules",
-            )
-            chat_budget = st.selectbox(
-                "What is your budget?",
-                BUDGET_OPTIONS,
-                key="chat_budget",
-            )
-            chat_comfort = st.selectbox(
-                "How comfortable are you with technology?",
-                COMFORT_OPTIONS,
-                key="chat_comfort",
-            )
-            if st.button("Ask Vee", key="ask_vee"):
-                typed = bool(chat_text.strip())
-                typed_job = ((ai_job_from_text(chat_text) or job_from_text(chat_text))if typed else None)
-                st.session_state["chat_answer"] = {
-                    "business": chat_business,
-                    "job": typed_job or chat_job,
-                    "budget": chat_budget,
-                    "comfort": chat_comfort,
-                    "text": chat_text.strip(),
-                    "typed": typed,
-                    "understood": typed_job is not None,
-                }
-            if "chat_answer" in st.session_state:
-                show_chat_answer(st.session_state["chat_answer"])
+            st.markdown("[Go to Chat with Vee](./#chat-with-vee)")
 
         # Research and methodology
         with st.expander("Research and scoring method"):
