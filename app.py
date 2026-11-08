@@ -174,7 +174,7 @@ def starting_cost(tool):
 def score_tools(data, job, cap, comfort):
     """Explainable rule based score: job fit 3, price fit 2, effort fit 1."""
     scored = []
-     for _, row in data.iterrows():
+    for _, row in data.iterrows():
         if row["challenge"] != job:
             continue
 
