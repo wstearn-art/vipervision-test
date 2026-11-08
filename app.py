@@ -611,7 +611,6 @@ st.markdown("""
     <div class="nav-logo">VipervisionAI</div>
     <div class="nav-links">
         <a href="./" target="_self">Home</a>
-        <a href="./#chat-with-vee" target="_self">Chat with Vee</a>
         <a href="./catalog" target="_self">Catalog</a>
         <a href="./about" target="_self">About the Website</a>
         <a href="./#about-the-creators" target="_self">About the Creators</a>
