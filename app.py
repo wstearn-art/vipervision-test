@@ -605,18 +605,8 @@ load_css("style.css")
 
 st.markdown("<div id='top'></div>", unsafe_allow_html=True)
 
-# Nav bar locked to the top of the page
-st.markdown("""
-<div class="navbar">
-    <div class="nav-logo">VipervisionAI</div>
-    <div class="nav-links">
-        <a href="./" target="_self">Home</a>
-        <a href="./catalog" target="_self">Catalog</a>
-        <a href="./about" target="_self">About the Website</a>
-        <a href="./#about-the-creators" target="_self">About the Creators</a>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# The custom navigation is rendered below using Streamlit's internal page links.
+# Unlike raw HTML href links, these stay in the existing Streamlit session.
 
 # Home page: everything except the catalog
 def home_page():
@@ -1086,6 +1076,8 @@ def about_page():
                 "jobs, all budgets, and both comfort levels."
             )
 
+    st.markdown("### About the Creators")
+    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will.")
 
 
 @st.fragment
@@ -1221,14 +1213,49 @@ def catalog_page():
             show_tool_link(link_row["website"], name)
 
 
-# Page routing. The nav bar at the top links to these pages,
-# so Streamlit's own page menu is hidden.
-page = st.navigation(
-    [
-        st.Page(home_page, title="Home", url_path="home", default=True),
-        st.Page(catalog_page, title="Catalog", url_path="catalog"),
-        st.Page(about_page, title="About the Website", url_path="about"),
-    ],
-    position="hidden",
-)
+# Native Streamlit navigation keeps session state when visitors change pages.
+# These use the exact same callable pages as the previous routing setup.
+home_route = st.Page(home_page, title="Home", url_path="home", default=True)
+catalog_route = st.Page(catalog_page, title="Catalog", url_path="catalog")
+about_route = st.Page(about_page, title="About the Website", url_path="about")
+page = st.navigation([home_route, catalog_route, about_route], position="hidden")
+
+# Maintain a simple, dark top bar, but replace raw anchors with internal links.
+# Existing theme colors remain unchanged throughout the rest of the application.
+st.markdown("""
+<style>
+[class*="st-key-vv_internal_nav"] {
+  position: sticky;
+  top: 0;
+  z-index: 999;
+  width: 100%;
+  background: #07171c;
+  border-bottom: 2px solid #39FF88;
+  padding: 0.35rem 0.8rem;
+  margin-bottom: 0.5rem;
+  border-radius: 0;
+}
+[class*="st-key-vv_internal_nav"] [data-testid="stPageLink"] a,
+[class*="st-key-vv_internal_nav"] a {
+  color: #e7f9f7 !important;
+  text-decoration: none !important;
+  font-weight: 600;
+}
+[class*="st-key-vv_internal_nav"] a:hover { color: #39FF88 !important; }
+</style>
+""", unsafe_allow_html=True)
+with st.container(key="vv_internal_nav"):
+    logo, home_link, catalog_link, about_link, creators_link = st.columns([2.1, 0.9, 1, 1.6, 1.6])
+    with logo:
+        st.markdown("**VipervisionAI**")
+    with home_link:
+        st.page_link(home_route, label="Home")
+    with catalog_link:
+        st.page_link(catalog_route, label="Catalog")
+    with about_link:
+        st.page_link(about_route, label="About the Website")
+    with creators_link:
+        # Creators details are also present on the About page, allowing native routing.
+        st.page_link(about_route, label="About the Creators")
+
 page.run()
