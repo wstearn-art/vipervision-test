@@ -757,9 +757,6 @@ def home_page():
             f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
         )
 
-    # Divider between the explore section and Find my tools
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
     # Divider before Free help
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
@@ -1084,8 +1081,7 @@ def catalog_page():
         f"{PRICE_CHECK_DATE}. Provider prices and terms can change."
     )
     search_text = st.text_input(
-        "Search the catalog",
-        placeholder="For example: schedule, reviews, Square",
+        "Search the database",
     )
     catalog_col1, catalog_col2, catalog_col3 = st.columns([1, 1, 1])
     with catalog_col1:
@@ -1118,8 +1114,8 @@ def catalog_page():
     st.caption(f"Showing {len(shown)} catalog tools.")
     if shown.empty:
         st.info("No catalog tools match those filters. Clear the search or a filter to see more.")
-    for _, tool in shown.iterrows():
-        with st.container(border=True):
+    for card_number, (_, tool) in enumerate(shown.iterrows()):
+        with st.container(key=f"catalog_card_{card_number}"):
             st.markdown(f"#### {tool['tool_name']}")
             st.write(f"**Job:** {tool['challenge']}  |  **Business:** {tool['business_type']}")
             st.write(f"**Price:** {md(tool['price_note'])}  |  **Setup:** {tool['effort']}")
