@@ -1,7 +1,6 @@
 """ViperVision Vee: AI-led business conversation with catalog-grounded results.
 
-Drop-in replacement for the original vee_chat.py; app.py remains unchanged.
-OpenRouter creates conversational replies; Python validates inputs and ranks only
+ Python validates inputs and ranks only
 verified catalog entries. If AI is unavailable, the intake still works.
 """
 
@@ -292,7 +291,7 @@ def _followup(state, user_message, ranked):
 
 
 # Explicit, limited allowlist for cross-industry discovery. These products may
-# help with widely shared tasks, but no tattoo-parlor-specific verification is claimed.
+# help with widely shared tasks.
 GENERAL_PURPOSE_TOOL_NAMES = frozenset({
     "Canva Magic Studio", "Buffer AI Assistant", "Jasper", "Copy.ai", "ChatGPT", "Reclaim AI",
 })
