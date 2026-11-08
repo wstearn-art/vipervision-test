@@ -1077,7 +1077,7 @@ def about_page():
             )
 
     st.markdown("### About the Creators")
-    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will.")
+    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will, Team Lead.")
 
 
 @st.fragment
