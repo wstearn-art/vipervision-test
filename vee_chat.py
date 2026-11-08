@@ -456,6 +456,12 @@ def render_vee_chat(
         with st.chat_message(message["role"], avatar=vee_avatar() if message["role"] == "assistant" else None):
             st.write(message["content"])
 
+    # Keep the reply box immediately underneath the chat transcript, rather
+    # than after lengthy recommendation cards. A container makes chat_input
+    # render inline rather than pinning it to the bottom of the entire page.
+    with st.container():
+        reply = st.chat_input("Message Vee...", key="vee_guided_input")
+
     ranked = []
     if state["stage"] == "done":
         st.divider()
@@ -506,7 +512,6 @@ def render_vee_chat(
             st.session_state.vee_guided = _state()
             st.rerun()
 
-    reply = st.chat_input("Message Vee...", key="vee_guided_input")
     if not reply or not reply.strip():
         return
     reply = reply.strip()[:1500]
