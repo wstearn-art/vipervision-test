@@ -665,51 +665,68 @@ def home_page():
         )
 
     # Vee is the only recommendation intake; the old dropdown quiz is retired.
-    # Show the optional ROI calculator only after an owner has finished speaking to Vee.
     vee_state = st.session_state.get("vee_guided", {})
     if vee_state.get("stage") == "done":
-        # Return on investment calculator
-        st.header("Is it worth it? ROI calculator")
-        st.write(
-            "Use your own estimates to explore a possible return. "
-            "The time reduction is an assumption, not a measured result."
-        )
-        st.caption("Enter a price from Vee's recommendations or your own estimate below.")
-        hours = st.slider("Hours per week spent on this task", 0, 40, 5)
-        value = st.slider("Value of your time, dollars per hour", 10, 100, 25)
-        reduction = st.slider("Assumed time reduction, percent", 0, 80, 30)
-        if "roi_price" not in st.session_state:
-            st.session_state["roi_price"] = 0
-        tool_price = st.slider("Tool price, dollars per month", 0, 500, key="roi_price")
-        monthly_time_value = hours * value * 4.33
-        estimated_savings = monthly_time_value * reduction / 100
-        estimated_net = estimated_savings - tool_price
-        roi1, roi2, roi3 = st.columns(3)
-        with roi1:
-            st.metric("Monthly time value", money(monthly_time_value))
-        with roi2:
-            st.metric("Estimated monthly savings", money(estimated_savings))
-        with roi3:
-            st.metric("Estimated net monthly benefit", money(estimated_net))
-        if tool_price > 0 and monthly_time_value > 0:
-            needed = tool_price / monthly_time_value * 100
-            if needed <= 100:
-                st.write(
-                    f"To cover a {md(f'${tool_price}')} monthly price, the tool would need "
-                    f"to cut about {needed:.0f} percent of the time spent on this task."
-                )
-            else:
-                st.write(
-                    "At these inputs the tool costs more than all of the time spent on "
-                    "this task is worth."
-                )
-        if estimated_net < 0:
-            st.warning("With these inputs the tool costs more than the time it saves.")
-        st.caption(
-            "This estimate uses 4.33 weeks in a month. It excludes setup time, taxes, fees, "
-            "and changes in demand. Use the provider price and your own measured results "
-            "before making a decision."
-        )
+        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+        # Keep the interactive ROI tool readable on large desktop displays.
+        roi_left, roi_center, roi_right = st.columns([1, 3, 1])
+        with roi_center:
+            with st.container(border=True):
+                st.subheader("Is it worth it? Estimate your ROI")
+                st.caption("Illustrative estimate, not a promised saving. Use your own numbers.")
+
+                recommended = st.session_state.get("vee_roi_candidates", [])
+                price_choices = ["Enter my own cost"] + [item["name"] for item in recommended]
+                default_choice = 1 if recommended else 0
+                chosen = st.selectbox("Tool to evaluate", price_choices,
+                                      index=default_choice, key="roi_tool_choice")
+                selected = next((item for item in recommended if item["name"] == chosen), None)
+                if selected and selected["cost"] is not None:
+                    tool_price = float(selected["cost"])
+                    st.write("**Catalog starting price:** " + md(f"${tool_price:,.2f}/month"))
+                    st.caption(selected["note"])
+                    st.caption("Change the selection to 'Enter my own cost' to model a different plan or seat count.")
+                else:
+                    tool_price = float(st.number_input(
+                        "Estimated total monthly tool cost ($)", min_value=0.0,
+                        max_value=100000.0, value=0.0, step=5.0,
+                        key="roi_custom_price"))
+                    if selected:
+                        st.warning("Total price for this tool isn't confirmed. Enter a quote that includes required subscriptions and seats.")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    hours = st.number_input("Hours spent on this task each week",
+                                            min_value=0.0, max_value=168.0,
+                                            value=5.0, step=0.5, key="roi_hours")
+                    value = st.number_input("Hourly value of that work ($)",
+                                            min_value=0.0, max_value=10000.0,
+                                            value=25.0, step=5.0, key="roi_hourly")
+                with c2:
+                    reduction = st.slider("Estimated time saved (%)", 0, 100, 30,
+                                          key="roi_reduction")
+                    st.caption("An assumption to test—not a measured AI performance claim.")
+
+                monthly_time_value = hours * value * 4.33
+                estimated_savings = monthly_time_value * reduction / 100
+                estimated_net = estimated_savings - tool_price
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Time value/month", money(monthly_time_value))
+                with m2:
+                    st.metric("Potential savings/month", money(estimated_savings))
+                with m3:
+                    st.metric("Estimated net/month", money(estimated_net))
+                if tool_price > 0 and monthly_time_value > 0:
+                    needed = tool_price / monthly_time_value * 100
+                    if needed <= 100:
+                        st.caption(f"Break-even requires about {needed:.0f}% time savings at these inputs.")
+                    else:
+                        st.warning("This tool's modeled cost exceeds the full monthly value of the task.")
+                if estimated_net < 0:
+                    st.warning("At these assumptions, costs exceed estimated time savings.")
+                st.caption("Assumes 4.33 weeks/month. Excludes onboarding, taxes, usage fees, "
+                           "additional seats and other costs. Confirm actual pricing and measure savings before purchase.")
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
     st.markdown("### Browse the complete catalog")

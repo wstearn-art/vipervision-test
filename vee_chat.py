@@ -9,10 +9,11 @@ import json
 import re
 
 import requests
+import pandas as pd
 import streamlit as st
 
 MODEL = "openai/gpt-4o-mini"
-STATE_VERSION = 2
+STATE_VERSION = 3
 FIELDS = ("name", "business", "challenge", "goal", "budget", "comfort", "employees")
 QUESTIONS = {
     "name": "Hi! I'm Vee, your AI business advisor. What should I call you?",
@@ -106,6 +107,8 @@ def _number_of_people(message):
 
 def _monthly_budget(message):
     text = message.lower().replace(",", "").strip()
+    if re.search(r"\b(any price|any budget|unlimited|no (?:spending |budget )?limit|whatever it costs|no maximum|open to all (?:prices|options)|flexible budget|budget is flexible)\b", text):
+        return float("inf")
     if re.search(r"\b(free|nothing|zero|no budget)\b", text) or text == "$0":
         return 0.0
     match = re.search(r"\$\s*(\d+(?:\.\d+)?)|\b(\d+(?:\.\d+)?)\s*(?:dollars?|bucks?|/mo|per month|a month)?\b", text)
@@ -116,6 +119,8 @@ def _monthly_budget(message):
 
 
 def _budget_label(amount, caps):
+    if amount == float("inf"):
+        return max(caps, key=caps.get)
     if amount == 0:
         return "Free only" if "Free only" in caps else min(caps, key=caps.get)
     for label, cap in sorted(caps.items(), key=lambda item: item[1]):
@@ -282,7 +287,7 @@ def _followup(state, user_message, ranked):
 # Explicit, limited allowlist for cross-industry discovery. These products may
 # help with widely shared tasks, but no tattoo-parlor-specific verification is claimed.
 GENERAL_PURPOSE_TOOL_NAMES = frozenset({
-    "Canva Magic Studio", "Buffer AI Assistant", "Jasper", "Copy.ai", "ChatGPT",
+    "Canva Magic Studio", "Buffer AI Assistant", "Jasper", "Copy.ai", "ChatGPT", "Reclaim AI",
 })
 
 
@@ -291,9 +296,13 @@ def _general_purpose_candidates(tools):
 
 
 def _matching_jobs(challenge, classified_job):
-    """Keep the classified job and recognize an explicit combined marketing request."""
-    jobs = [classified_job]
+    """Prefer explicit workforce scheduling language to broad AI operations guesses."""
     words = challenge.casefold()
+    workforce = re.search(r"\b(employee|employees|staff|workers?|shifts?|team)\b", words)
+    scheduling = re.search(r"\b(schedul(?:e|es|ing)|time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in|shift planning)\b", words)
+    if (workforce and scheduling) or re.search(r"\b(time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in)\b", words):
+        return ["Scheduling"]
+    jobs = [classified_job] if classified_job else []
     if (re.search(r"\b(marketing|advertis(?:e|ing)|promot(?:e|ion))\b", words)
             and re.search(r"\b(social media|socials|instagram|facebook|tiktok|posts?)\b", words)):
         for job in ("Marketing", "Social media"):
@@ -463,6 +472,7 @@ def render_vee_chat(
         reply = st.chat_input("Message Vee...", key="vee_guided_input")
 
     ranked = []
+    st.session_state["vee_roi_candidates"] = []
     if state["stage"] == "done":
         st.divider()
         st.markdown(f"### A few options for {a.get('name', 'you')}")
@@ -484,10 +494,26 @@ def render_vee_chat(
             else:
                 pool = business_tools(tools, a["catalog_business"])
             ranked = _rank_jobs(pool, jobs, a["budget_amount"], a["comfort"], score_tools)
-            st.caption(
-                f"{a['business']}  ·  {', '.join(jobs)}  ·  "
-                f"Budget up to ${a['budget_amount']:,.0f}/month  ·  {a['employees']} people"
-            )
+            # Share real catalog prices with the ROI calculator below Vee.
+            # Quote-only tools require manual entry; never pretend a missing price is $0.
+            roi_candidates = []
+            for entry in ranked[:3]:
+                tool = entry["tool"]
+                monthly = tool.get("monthly_cost")
+                free = tool.get("free_price")
+                price_note = str(tool.get("price_note", ""))
+                # A per-seat, add-on, or quote price is not a confirmed total.
+                needs_quote = bool(re.search(r"per seat|/seat|add.on|quote|per location", price_note, re.I))
+                cost = (None if needs_quote else
+                        float(monthly) if monthly is not None and not pd.isna(monthly) else
+                        0.0 if free is not None and not pd.isna(free) and float(free) == 0 else None)
+                roi_candidates.append({"name": str(tool["tool_name"]), "cost": cost,
+                                       "note": str(tool.get("price_note", ""))})
+            st.session_state["vee_roi_candidates"] = roi_candidates
+            budget_display = ("No budget ceiling" if a["budget_amount"] == float("inf")
+                              else f"Budget up to ${a['budget_amount']:,.0f}/month")
+            st.caption(f"{a['business']}  ·  {', '.join(jobs)}  ·  "
+                       f"{budget_display}  ·  {a['employees']} people")
             if a.get("goal"):
                 st.write("**Your priority:** " + str(a["goal"]))
             st.caption("Challenge interpreted using " + (
@@ -544,10 +570,16 @@ def render_vee_chat(
         with st.spinner("Vee is thinking about your challenge..."):
             category = ai_job_from_text(reply)
         state["classification_source"] = "OpenRouter" if category else "Keyword fallback"
-        a["job"] = category or job_from_text(reply)
+        preliminary = category or job_from_text(reply)
+        a["job"] = (_matching_jobs(reply, preliminary) or [preliminary])[0]
         state["goal_question"] = _goal_question(state)
     elif stage == "goal":
         a["goal"] = reply
+        # The owner may clarify a vague challenge here: use that evidence
+        # instead of locking in the model's first broad category.
+        corrected = _matching_jobs(a.get("challenge", "") + " " + reply, a.get("job"))
+        if corrected:
+            a["job"] = corrected[0]
     elif stage == "budget":
         amount = _monthly_budget(reply)
         if amount is None:
