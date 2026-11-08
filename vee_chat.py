@@ -1,8 +1,3 @@
-"""ViperVision AI: guided conversational intake for the homepage.
-
-Uses the existing deterministic matching functions and curated catalog in app.py.
-No API keys or credentials are stored here.
-"""
 
 import re
 import streamlit as st
