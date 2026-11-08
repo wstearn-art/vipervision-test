@@ -295,20 +295,36 @@ def _general_purpose_candidates(tools):
     return tools[tools["tool_name"].isin(GENERAL_PURPOSE_TOOL_NAMES)].copy()
 
 
-def _matching_jobs(challenge, classified_job):
-    """Prefer explicit workforce scheduling language to broad AI operations guesses."""
-    words = challenge.casefold()
-    workforce = re.search(r"\b(employee|employees|staff|workers?|shifts?|team)\b", words)
-    scheduling = re.search(r"\b(schedul(?:e|es|ing)|time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in|shift planning)\b", words)
-    if (workforce and scheduling) or re.search(r"\b(time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in)\b", words):
+def _matching_jobs(challenge, classified_job, goal=""):
+    """Ground catalog categories in the owner's challenge AND clarified goal.
+
+    Explicit business intent outranks a broad model classification. A narrow
+    customer-support classification should not override sales/retention needs.
+    Return related categories only when the owner's words support them.
+    """
+    text = f"{challenge} {goal}".casefold()
+    workforce = re.search(r"\b(employee|employees|staff|workers?|shifts?|team)\b", text)
+    scheduling = re.search(r"\b(schedul(?:e|es|ing)|time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in|shift planning)\b", text)
+    if (workforce and scheduling) or re.search(r"\b(time\s?keep(?:ing)?|timesheets?|time clocks?|clock(?:ing)? in)\b", text):
         return ["Scheduling"]
-    jobs = [classified_job] if classified_job else []
-    if (re.search(r"\b(marketing|advertis(?:e|ing)|promot(?:e|ion))\b", words)
-            and re.search(r"\b(social media|socials|instagram|facebook|tiktok|posts?)\b", words)):
-        for job in ("Marketing", "Social media"):
-            if job not in jobs:
-                jobs.append(job)
-    return jobs
+
+    # Store sales, repeat customers, and customer acquisition are marketing
+    # goals, not evidence of a customer-support inquiry handling problem.
+    marketing = re.search(
+        r"\b(marketing|advertis(?:e|ing|ements?)|promot(?:e|ion|ions)|campaigns?|"
+        r"attract(?:ing)?\s+(?:more\s+)?customers?|new customers?|"
+        r"repeat customers?|more customers?|customer retention|customer loyalty|loyalty|"
+        r"boost(?:ing)?\s+sales|increas(?:e|ing)\s+(?:my\s+|our\s+)?sales|"
+        r"more sales|grow(?:ing)?\s+(?:my\s+|our\s+)?(?:sales|customer base))\b", text)
+    social = re.search(r"\b(social media|socials|instagram|facebook|tiktok|posts?|reels?)\b", text)
+    if marketing:
+        return ["Marketing", "Social media"] if social else ["Marketing"]
+    if social:
+        return ["Social media"]
+
+    # Keep an existing, valid model category when the user's text has no
+    # stronger signals. Never generate adjacent categories merely to fill cards.
+    return [classified_job] if classified_job else []
 
 
 def _rank_jobs(pool, jobs, cap, comfort, score_tools):
@@ -478,9 +494,9 @@ def render_vee_chat(
         st.markdown(f"### A few options for {a.get('name', 'you')}")
         if a.get("job") is None:
             st.info("I couldn't confidently connect that challenge to a researched catalog category. "
-                    "You can describe the problem in another way below.")
+                    "You can clarify the problem in the chat above.")
         else:
-            jobs = _matching_jobs(a["challenge"], a["job"])
+            jobs = _matching_jobs(a["challenge"], a["job"], a.get("goal", ""))
             cross_industry = a.get("catalog_business") is None
             if cross_industry:
                 # Cross-industry candidates: these tools offer broadly applicable
@@ -517,16 +533,18 @@ def render_vee_chat(
             if a.get("goal"):
                 st.write("**Your priority:** " + str(a["goal"]))
             st.caption("Challenge interpreted using " + (
-                "OpenRouter AI." if state["classification_source"] == "OpenRouter" else "keyword matching."))
+                "OpenRouter AI." if state["classification_source"] == "OpenRouter"
+                else "business intent rules." if state["classification_source"] == "Catalog intent rules"
+                else "keyword matching."))
             if not ranked:
                 st.info("No catalog candidates meet both this challenge and your exact monthly budget. "
-                        "Ask Vee what to consider next, or start a new conversation.")
+                        "Ask Vee in the chat above what to consider next, or start a new conversation.")
             else:
                 for index, item in enumerate(ranked[:3], start=1):
                     _result_card(item, index, a["employees"], cross_industry, a, state, ranked)
                 st.caption("Catalog details are research snapshots, not live pricing or proof of "
                            "suitability. Verify current plans, seats and capabilities with the provider.")
-        st.caption("Want more details about a tool or help putting it into practice? Use the buttons above, or ask Vee below.")
+        st.caption("Want more details about a tool or help putting it into practice? Use the buttons above, or message Vee in the chat above.")
         if ranked and st.button("Ask Vee to compare these options", key="vee_ask_compare"):
             names = ", ".join(str(x["tool"]["tool_name"]) for x in ranked[:3])
             _send_guided_followup(
@@ -571,15 +589,21 @@ def render_vee_chat(
             category = ai_job_from_text(reply)
         state["classification_source"] = "OpenRouter" if category else "Keyword fallback"
         preliminary = category or job_from_text(reply)
+        a["initial_ai_job"] = category
+        a["initial_job"] = preliminary
         a["job"] = (_matching_jobs(reply, preliminary) or [preliminary])[0]
+        if a["job"] != preliminary:
+            state["classification_source"] = "Catalog intent rules"
         state["goal_question"] = _goal_question(state)
     elif stage == "goal":
         a["goal"] = reply
         # The owner may clarify a vague challenge here: use that evidence
         # instead of locking in the model's first broad category.
-        corrected = _matching_jobs(a.get("challenge", "") + " " + reply, a.get("job"))
+        corrected = _matching_jobs(a.get("challenge", ""), a.get("job"), reply)
         if corrected:
             a["job"] = corrected[0]
+            if corrected[0] != (a.get("initial_ai_job") or a.get("initial_job")):
+                state["classification_source"] = "Catalog intent rules"
     elif stage == "budget":
         amount = _monthly_budget(reply)
         if amount is None:
