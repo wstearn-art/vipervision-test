@@ -4,6 +4,7 @@
     --navbar-color: #0A1410;
     --header-color: #102A43;
     --text-color-white: #FFFFFF;
+    --text-color-black: #000000;
     --text-color-light: #E8F5E9;
     --text-color-dark: #17231F;
     --accent-color-neon-green: #39FF88;
@@ -211,6 +212,26 @@ div[class*="st-key-question_card"] div[data-baseweb="select"] * {
     color: var(--accent-color-neon-green);
 }
 
+/*Black text on every green button, including the text Streamlit wraps inside them*/
+.stButton button,
+.stButton button p,
+.stFormSubmitButton button,
+.stFormSubmitButton button p,
+.stDownloadButton button,
+.stDownloadButton button p,
+.stLinkButton a,
+.stLinkButton a p {
+    color: var(--text-color-black);
+}
+
+/*When you hover, the text turns green on the dark background*/
+.stButton button:hover p,
+.stFormSubmitButton button:hover p,
+.stDownloadButton button:hover p,
+.stLinkButton a:hover p {
+    color: var(--accent-color-neon-green);
+}
+
 /*Vee's speech box, blue with a green outline*/
 div[class*="st-key-vee_intro"] {
     background-color: var(--header-color);
@@ -280,7 +301,7 @@ div[class*="st-key-vee_intro"] div[class*="st-key-vee_gold"] li {
 /*Start the five questions button in Vee's box*/
 div[class*="st-key-vee_intro"] .stLinkButton a,
 div[class*="st-key-vee_intro"] .stLinkButton a p {
-    color: var(--text-color-dark);
+    color: var(--text-color-black);
 }
 
 div[class*="st-key-vee_intro"] .stLinkButton a {
@@ -537,7 +558,7 @@ div[class*="st-key-explore_card"] .stLinkButton a {
 
 div[class*="st-key-explore_card"] .stButton button p,
 div[class*="st-key-explore_card"] .stLinkButton a p {
-    color: var(--navbar-color);
+    color: var(--text-color-black);
 }
 
 div[class*="st-key-explore_card"] .stButton button:hover,
@@ -699,6 +720,33 @@ div[class*="st-key-about_faq"] [data-testid="stExpander"] p {
     font-weight: 700;
     color: var(--text-color-white);
     margin-bottom: 16px;
+}
+
+/*Catalog page cards, in the same blue ombre as the Find my tools box*/
+div[class*="st-key-catalog_card"] {
+    background:
+        linear-gradient(to bottom, rgba(73, 184, 208, 0.35), rgba(73, 184, 208, 0.05)),
+        var(--background-color);
+    border: 1px solid var(--accent-color-blue);
+    border-radius: 16px;
+    padding: 22px;
+    margin-bottom: 16px;
+}
+
+/*White text and titles inside the catalog cards*/
+div[class*="st-key-catalog_card"] h4,
+div[class*="st-key-catalog_card"] p {
+    color: var(--text-color-white);
+}
+
+/*Links inside the catalog cards*/
+div[class*="st-key-catalog_card"] a {
+    color: var(--accent-color-neon-green);
+}
+
+/*Small print inside the catalog cards*/
+div[class*="st-key-catalog_card"] [data-testid="stCaptionContainer"] {
+    color: var(--text-color-light);
 }
 
 /*Fade in effect for the gold bubbles*/
