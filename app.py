@@ -15,7 +15,7 @@ st.set_page_config(
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "ai_tools.csv"
 VEE_FILE = BASE_DIR / "vee.png"
-EXPECTED_TOOL_COUNT = 12
+EXPECTED_TOOL_COUNT = 22
 PRICE_CHECK_DATE = "Nov 6, 2026"  # replaced by the newest checked_date in the catalog
 
 REQUIRED_COLUMNS = [
@@ -50,13 +50,15 @@ JOBS = [
     "Daily operations",
     "Scheduling",
     "Accounting",
+    "Estimating",
+    "Landscape Design",
 ]
 
 # Plain words that map typed text in the chat helper to one catalog job.
 JOB_WORDS = {
     "Reviews": ["review", "reviews", "rating", "ratings", "reputation", "stars"],
     "Customer Questions": [
-        "question", "questions", "inbox", "message", "messages", "texts",
+        "question", "questions", "inbox", "message", "messages", "texts", "calls", "phone", "caller",
         "chatbot", "answer", "answers", "inquiries",
     ],
     "Social media": [
@@ -82,9 +84,11 @@ JOB_WORDS = {
     "Accounting": [
         "accounting", "bookkeeping", "taxes", "invoices", "expenses", "books",
     ],
+    "Estimating": ["estimate", "estimates", "estimating", "quote", "quotes", "measurements", "measure", "acreage", "takeoff", "takeoffs"],
+    "Landscape Design": ["landscape", "landscaping", "garden", "gardens", "yard", "yards", "visualize", "renderings"],
 }
 
-BUSINESS_TYPES = ["Restaurant / Cafe", "Coffee Shop"]
+BUSINESS_TYPES = ["Restaurant / Cafe", "Coffee Shop", "Landscaping"]
 BUDGET_OPTIONS = list(BUDGET_CAP)
 COMFORT_OPTIONS = ["Keep it simple", "I can learn a bit"]
 
@@ -822,7 +826,7 @@ def about_page():
     with st.container(key="about_faq"):
         with st.expander("What does VipervisionAI do?"):
             st.write(
-                "It helps restaurants and coffee shops discover, compare, and plan how to "
+                "It helps small businesses discover, compare, and plan how to "
                 "adopt AI tools. Chat with Vee to discuss a problem and see catalog-grounded "
                 "candidates with reasons and limitations."
             )
@@ -850,8 +854,8 @@ def about_page():
             )
         with st.expander("Which businesses does it cover right now?"):
             st.write(
-                "The current catalog covers restaurants and coffee shops. Our sixteen week "
-                "plan would add more business types, such as HVAC and landscaping companies."
+                "The current catalog covers restaurants, coffee shops and landscaping. "
+                "We plan to add more verified business categories over time."
             )
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
@@ -875,8 +879,8 @@ def about_page():
         # Research and methodology
         with st.expander("Research and scoring method"):
             st.write(
-                "The current catalog contains the tools listed above for restaurants "
-                "and coffee shops. Each entry includes a job category, business type, "
+                "The current catalog contains the tools listed above for restaurants, "
+                "coffee shops and landscaping. Each entry includes a job category, business type, "
                 "setup effort, price note, provider website, source, and price check date."
             )
             st.write(
@@ -1057,7 +1061,7 @@ def about_page():
             st.caption(
                 "The scorer checks confirm that scores stay between 3 and 6, results are "
                 "sorted from best to worst, every result matches the chosen job, and the "
-                "breakdown adds up to the score. They run for both business types, all "
+                "breakdown adds up to the score. They run for all listed business types, all "
                 "jobs, all budgets, and both comfort levels."
             )
 

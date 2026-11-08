@@ -129,6 +129,8 @@ def _business_type(message, available):
     for option in available:
         if option.casefold() in lower:
             return option
+    if any(term in lower for term in ("landscap", "lawn care", "lawn mowing", "yard maintenance")):
+        return next((o for o in available if "landscap" in o.lower()), None)
     if "coffee" in lower:
         return next((o for o in available if "coffee" in o.lower()), None)
     if any(term in lower for term in ("restaurant", "cafe", "café", "diner", "bistro", "food truck")):
