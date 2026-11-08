@@ -1,6 +1,6 @@
 """ViperVision Vee: AI-led business conversation with catalog-grounded results.
 
-the original vee_chat.py; app.py remains unchanged.
+Drop-in replacement for the original vee_chat.py; app.py remains unchanged.
 OpenRouter creates conversational replies; Python validates inputs and ranks only
 verified catalog entries. If AI is unavailable, the intake still works.
 """
@@ -28,12 +28,37 @@ NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
            "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
 
 
+def _record_ai_status(status, *, http_status=None, usage=None):
+    """Store connection diagnostics in this Streamlit session, never credentials or text."""
+    diag = st.session_state.setdefault("vee_api_diagnostics", {
+        "attempts": 0, "successes": 0, "failures": 0,
+        "input_tokens": 0, "output_tokens": 0,
+    })
+    diag["attempts"] += 1
+    if status == "Success":
+        diag["successes"] += 1
+    else:
+        diag["failures"] += 1
+    diag["last_status"] = status
+    diag["last_http_status"] = http_status
+    if isinstance(usage, dict):
+        for source, target in (("prompt_tokens", "input_tokens"),
+                               ("completion_tokens", "output_tokens")):
+            count = usage.get(source)
+            if isinstance(count, int) and count >= 0:
+                diag[target] += count
+
+
 def _call_ai(system, user_messages, *, max_tokens=180):
-    """Return a short OpenRouter response, or None on an API/secret failure."""
+    """Call OpenRouter; save anonymous connection status, fall back on failure."""
     try:
         key = st.secrets.get("OPENROUTER_API_KEY", "")
-        if not key:
-            return None
+    except (KeyError, FileNotFoundError):
+        key = ""
+    if not key:
+        _record_ai_status("Missing OPENROUTER_API_KEY")
+        return None
+    try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -42,11 +67,44 @@ def _call_ai(system, user_messages, *, max_tokens=180):
                   "temperature": 0.5, "max_tokens": max_tokens},
             timeout=15,
         )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        return content.strip() if isinstance(content, str) and content.strip() else None
-    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
-        return None
+        if not response.ok:
+            # HTTP status only: never display response bodies or credentials.
+            _record_ai_status("HTTP error", http_status=response.status_code)
+            return None
+        payload = response.json()
+        message = payload["choices"][0]["message"]["content"]
+        content = message.strip() if isinstance(message, str) else ""
+        if not content:
+            _record_ai_status("Empty AI response", http_status=response.status_code,
+                              usage=payload.get("usage"))
+            return None
+        _record_ai_status("Success", http_status=response.status_code,
+                          usage=payload.get("usage"))
+        return content
+    except requests.Timeout:
+        _record_ai_status("Request timeout")
+    except requests.RequestException:
+        _record_ai_status("Network/API connection error")
+    except (KeyError, IndexError, TypeError, ValueError):
+        _record_ai_status("Unexpected API response")
+    return None
+
+
+def _show_ai_diagnostics():
+    """Temporary troubleshooting panel; no extra requests and no conversation logs."""
+    with st.expander("AI connection diagnostics (testing)", expanded=False):
+        diag = st.session_state.get("vee_api_diagnostics", {})
+        st.write(f"**Vee chat OpenRouter calls:** {diag.get('attempts', 0)}")
+        st.write(f"**Successful:** {diag.get('successes', 0)} · "
+                 f"**Fallback / failed:** {diag.get('failures', 0)}")
+        last = diag.get("last_status", "No call attempted in this session")
+        http = diag.get("last_http_status")
+        st.write("**Last result:** " + last + (f" (HTTP {http})" if http else ""))
+        st.write(f"**Reported tokens:** {diag.get('input_tokens', 0)} input, "
+                 f"{diag.get('output_tokens', 0)} output")
+        st.caption("Counts are for Vee's direct AI calls in this browser session. "
+                   "The classifier in app.py is not included. Token counts depend on "
+                   "what the API reports. No keys or chat text are displayed or stored here.")
 
 
 def _number_of_people(message):
@@ -111,6 +169,24 @@ def _comfort(message, options):
 def _is_greeting(message):
     """Don't record an opening hello as the visitor's name."""
     return bool(re.fullmatch(r"(?:hi|hello|hey|hiya|good morning|good afternoon|good evening)[!. ]*", message.strip(), re.I))
+
+
+
+def _clean_name(message):
+    """Extract a preferred name from a short introduction without an AI call.
+
+    Preserve nicknames such as "Best friend" when no introduction pattern exists.
+    """
+    text = message.strip()
+    # Strip casual greetings only when they precede an explicit introduction.
+    text = re.sub(r"^(?:(?:oh[\s,!.]+)?(?:hi|hello|hey|hiya)[\s,!.]+)+", "", text, flags=re.I)
+    # A name might be introduced directly or as part of a conversational sentence.
+    match = re.match(r"^(?:my name is|you can call me|call me|i[’']?m|i am)\s+(.+)$", text, re.I)
+    if match:
+        text = match.group(1).strip()
+    # Avoid swallowing the rest of a sentence as part of a name.
+    text = re.split(r"[,!.?;]|\s+(?:and|but)\s+", text, maxsplit=1)[0].strip()
+    return text[:60].strip()
 
 
 def _state():
@@ -219,7 +295,7 @@ def _followup(state, user_message, ranked):
 
 
 # Explicit, limited allowlist for cross-industry discovery. These products may
-# help with widely shared tasks.
+# help with widely shared tasks, but no tattoo-parlor-specific verification is claimed.
 GENERAL_PURPOSE_TOOL_NAMES = frozenset({
     "Canva Magic Studio", "Buffer AI Assistant", "Jasper", "Copy.ai", "ChatGPT",
 })
@@ -339,6 +415,7 @@ def render_vee_chat(
     _style_vee()
     st.subheader("🐍 Chat with Vee")
     st.caption("Tell Vee what you're trying to improve. She'll ask a few useful questions and find catalog-based options.")
+    _show_ai_diagnostics()
 
     for message in state["messages"]:
         with st.chat_message(message["role"], avatar=vee_avatar() if message["role"] == "assistant" else None):
@@ -404,10 +481,14 @@ def render_vee_chat(
     if stage == "name":
         if _is_greeting(reply):
             error = "Hi there! What would you like me to call you?"
-        elif len(reply) > 60:
-            error = "What should I call you? Just a first name is fine."
         else:
-            a["name"] = reply
+            name = _clean_name(reply)
+            if not name:
+                error = "What should I call you? Just a first name is fine."
+            elif len(reply) > 120:
+                error = "What should I call you? Just a first name is fine."
+            else:
+                a["name"] = name
     elif stage == "business":
         a["business"] = reply
         a["catalog_business"] = _business_type(reply, business_types)
