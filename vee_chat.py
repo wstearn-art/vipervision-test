@@ -388,12 +388,19 @@ def _owner_benefit(tool, answers):
             "Confirm the listed features actually support that goal before committing.")
 
 
-def _send_guided_followup(state, prompt, ranked):
-    """Process only a deliberately clicked follow-up, using the existing AI call."""
+def _send_guided_followup(state, prompt, ranked, *, source_key):
+    """Answer a card action inline, also retaining it in chat history.
+
+    The click is the only trigger for an AI request. Avoid a forced rerun
+    that would leave the visitor stranded below the conversation.
+    """
     state["messages"].append({"role": "user", "content": prompt})
-    response = _followup(state, prompt, ranked)
+    with st.spinner("Vee is preparing your answer..."):
+        response = _followup(state, prompt, ranked)
     state["messages"].append({"role": "assistant", "content": response})
-    st.rerun()
+    st.session_state["vee_inline_followup"] = {
+        "source": source_key, "response": response,
+    }
 
 
 def _result_card(item, number, people, cross_industry, answers, state, ranked):
@@ -405,7 +412,9 @@ def _result_card(item, number, people, cross_industry, answers, state, ranked):
             st.markdown(f"### {number}. {tool['tool_name']}")
             st.caption(str(tool["challenge"]) + "  ·  " + str(tool["effort"]) + " setup")
         with score:
-            st.metric("Catalog fit", f"{item['score']}/6", help="Job fit 3, price fit 2, effort fit 1. This does not measure industry suitability.")
+            st.metric("Catalog match", f"{item['score']}/6")
+            st.caption("Task 3 · Price 2 · Setup 1")
+        st.caption("Match score reflects catalog criteria—not an industry rating or guaranteed result.")
         st.markdown("**Published pricing**")
         st.write(str(tool["price_note"]).replace("$", "\\$"))
         st.markdown("**How it could help you**")
@@ -435,19 +444,25 @@ def _result_card(item, number, people, cross_industry, answers, state, ranked):
         more, implement = st.columns(2)
         name = str(tool["tool_name"])
         with more:
-            if st.button("Learn more", key=f"vee_more_{number}", use_container_width=True):
+            if st.button("Explore benefits", key=f"vee_more_{number}", use_container_width=True):
                 _send_guided_followup(
                     state,
                     f"Tell me more about {name}: its advantages, limitations, and how it could help my stated goal. Only use catalog facts for product claims.",
-                    ranked,
+                    ranked, source_key=f"tool_{number}",
                 )
         with implement:
-            if st.button("How to get started", key=f"vee_implement_{number}", use_container_width=True):
+            if st.button("Get setup guidance", key=f"vee_implement_{number}", use_container_width=True):
                 _send_guided_followup(
                     state,
                     f"Help me implement {name} for my business. Give me a practical first-week checklist, and flag steps or integrations the catalog cannot verify.",
-                    ranked,
+                    ranked, source_key=f"tool_{number}",
                 )
+        inline_reply = st.session_state.get("vee_inline_followup")
+        if inline_reply and inline_reply.get("source") == f"tool_{number}":
+            with st.container(border=True):
+                st.markdown("**Vee's answer**")
+                st.markdown(inline_reply["response"])
+                st.caption("This response is also saved in your conversation above.")
 
 
 def render_vee_chat(
@@ -550,10 +565,16 @@ def render_vee_chat(
             _send_guided_followup(
                 state,
                 f"Compare {names} for my business goal, explaining the main trade-offs using only verified catalog facts.",
-                ranked,
+                ranked, source_key="comparison",
             )
+        inline_comparison = st.session_state.get("vee_inline_followup")
+        if inline_comparison and inline_comparison.get("source") == "comparison":
+            with st.container(border=True):
+                st.markdown("**Vee's comparison**")
+                st.markdown(inline_comparison["response"])
         if st.button("Start a new conversation", key="vee_restart"):
             st.session_state.vee_guided = _state()
+            st.session_state.pop("vee_inline_followup", None)
             st.rerun()
 
     if not reply or not reply.strip():
