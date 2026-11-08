@@ -174,10 +174,14 @@ def starting_cost(tool):
 def score_tools(data, job, cap, comfort):
     """Explainable rule based score: job fit 3, price fit 2, effort fit 1."""
     scored = []
-    for _, row in data.iterrows():
-        if row["challenge"] != job:
-            continue
-        score = 3
+    fofor _, row in data.iterrows():
+    if row["challenge"] != job:
+        continue
+
+    if not price_fits(row, cap):
+        continue
+
+    score = 3
         breakdown = {
             "Job fit": 3,
             "Price fit": 0,
