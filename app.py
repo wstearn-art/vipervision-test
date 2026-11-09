@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import requests
-from vee_chat import render_vee_chat, catalog_tool_commentary
+from vee_chat import render_vee_chat
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
     page_icon="🔍",
@@ -605,8 +605,18 @@ load_css("style.css")
 
 st.markdown("<div id='top'></div>", unsafe_allow_html=True)
 
-# The custom navigation is rendered below using Streamlit's internal page links.
-# Unlike raw HTML href links, these stay in the existing Streamlit session.
+# Nav bar locked to the top of the page
+st.markdown("""
+<div class="navbar">
+    <div class="nav-logo">VipervisionAI</div>
+    <div class="nav-links">
+        <a href="./" target="_self">Home</a>
+        <a href="./catalog" target="_self">Catalog</a>
+        <a href="./about" target="_self">About the Website</a>
+        <a href="./#about-the-creators" target="_self">About the Creators</a>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 # Home page: everything except the catalog
 def home_page():
@@ -653,14 +663,10 @@ def home_page():
             vee_avatar=vee_avatar,
         )
 
-    # Vee is the only recommendation intake; the old dropdown quiz is retired.
-    vee_state = st.session_state.get("vee_guided", {})
-    if vee_state.get("stage") == "done":
-        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-        # Keep the interactive ROI tool readable on large desktop displays.
-        roi_left, roi_center, roi_right = st.columns([1, 3, 1])
-        with roi_center:
-            with st.container(border=True):
+        # Once the first chat with Vee is done, the ROI calculator shows right under it
+        vee_state = st.session_state.get("vee_guided", {})
+        if vee_state.get("stage") == "done":
+            with st.container(border=True, key="vee_roi"):
                 st.subheader("Is it worth it? Estimate your ROI")
                 st.caption("Illustrative estimate, not a promised saving. Use your own numbers.")
 
@@ -670,8 +676,7 @@ def home_page():
                 chosen = st.selectbox("Tool to evaluate", price_choices,
                                       index=default_choice, key="roi_tool_choice")
                 selected = next((item for item in recommended if item["name"] == chosen), None)
-                confirmed_cost = bool(selected and selected["cost"] is not None)
-                if confirmed_cost:
+                if selected and selected["cost"] is not None:
                     tool_price = float(selected["cost"])
                     st.write("**Catalog starting price:** " + md(f"${tool_price:,.2f}/month"))
                     st.caption(selected["note"])
@@ -682,8 +687,6 @@ def home_page():
                         max_value=100000.0, value=0.0, step=5.0,
                         key="roi_custom_price"))
                     if selected:
-                        if selected.get("eligibility_warning"):
-                            st.warning(selected["eligibility_warning"])
                         st.warning("Total price for this tool isn't confirmed. Enter a quote that includes required subscriptions and seats.")
 
                 c1, c2 = st.columns(2)
@@ -699,9 +702,6 @@ def home_page():
                                           key="roi_reduction")
                     st.caption("An assumption to test—not a measured AI performance claim.")
 
-                if selected and not confirmed_cost:
-                    st.caption("The $0 default in a custom estimate is not a verified free plan. "
-                               "Enter your actual total cost before using this result for a decision.")
                 monthly_time_value = hours * value * 4.33
                 estimated_savings = monthly_time_value * reduction / 100
                 estimated_net = estimated_savings - tool_price
@@ -756,9 +756,6 @@ def home_page():
         st.caption(
             f"Counts come from our tool catalog. Prices checked {PRICE_CHECK_DATE}."
         )
-
-    # Divider between the explore section and Find my tools
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
     # Divider before Free help
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
@@ -885,14 +882,6 @@ def about_page():
 
     # Your original dropdowns, styled the same as the questions above
     with st.container(key="about_faq_more"):
-        # Single conversational entrypoint; no second dropdown-based Vee interface.
-        with st.expander("Ask Vee in chat"):
-            st.write(
-                "Chat with Vee on the homepage. Describe your business problem in your "
-                "own words; Vee will discuss it and show relevant catalog-based candidates."
-            )
-            st.markdown("[Go to Chat with Vee](./#chat-with-vee)")
-
         # Research and methodology
         with st.expander("Research and scoring method"):
             st.write(
@@ -1082,37 +1071,6 @@ def about_page():
                 "jobs, all budgets, and both comfort levels."
             )
 
-    st.markdown("### About the Creators")
-    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will, team lead.")
-
-
-@st.fragment
-def catalog_vee_comment(tool):
-    """One provider action and one opt-in Vee action in the same card.
-
-    A fragment reruns only this panel. One answer per tool is stored in session
-    state, so Streamlit redraws don't trigger extra OpenRouter requests.
-    """
-    name = str(tool["tool_name"])
-    key = "catalog_vee_comment_" + re.sub(r"[^a-z0-9]+", "_", name.lower())
-    provider_col, vee_col = st.columns(2, gap="small")
-    with provider_col:
-        st.link_button("Visit provider", str(tool["website"]), use_container_width=True)
-    with vee_col:
-        clicked = st.button("Ask Vee about this tool", key="ask_" + key,
-                            use_container_width=True)
-    if clicked and key not in st.session_state:
-        with st.spinner(f"Vee is reviewing {name}..."):
-            st.session_state[key] = catalog_tool_commentary(tool)
-    if key in st.session_state:
-        with st.container(border=True):
-            st.markdown("**Vee's take**")
-            st.markdown(st.session_state[key])
-            st.caption(
-                "Based on catalog research, not live product verification. "
-                "Check the provider before buying."
-            )
-
 
 # Catalog page: the full list of tools on its own page
 def catalog_page():
@@ -1123,8 +1081,7 @@ def catalog_page():
         f"{PRICE_CHECK_DATE}. Provider prices and terms can change."
     )
     search_text = st.text_input(
-        "Search the catalog",
-        placeholder="For example: schedule, reviews, Square",
+        "Search the database",
     )
     catalog_col1, catalog_col2, catalog_col3 = st.columns([1, 1, 1])
     with catalog_col1:
@@ -1155,36 +1112,27 @@ def catalog_page():
         ).str.lower()
         shown = shown[haystack.str.contains(words, regex=False)]
     st.caption(f"Showing {len(shown)} catalog tools.")
-    # Catalog-specific styling: centered, readable cards with the original
-    # teal palette. Targets keyed catalog containers only; leaves Vee and ROI untouched.
-    st.markdown("""<style>
-    [class*="st-key-vv_catalog_card_"] {
-        max-width: 920px;
-        margin: 0 auto 18px auto;
-        background: linear-gradient(145deg, rgba(29, 78, 88, .66), rgba(10, 27, 35, .92));
-        border: 1px solid rgba(49, 155, 159, .48);
-        border-radius: 16px;
-    }
-    [class*="st-key-vv_catalog_card_"] [data-testid="stMarkdownContainer"] p {
-        line-height: 1.55;
-    }
-    </style>""", unsafe_allow_html=True)
     if shown.empty:
         st.info("No catalog tools match those filters. Clear the search or a filter to see more.")
-    for _, tool in shown.iterrows():
-        slug = re.sub(r"[^a-z0-9]+", "_", str(tool["tool_name"]).lower()).strip("_")
-        with st.container(border=True, key=f"vv_catalog_card_{slug}"):
-            st.markdown(f"#### {tool['tool_name']}")
-            st.caption(f"{tool['challenge']} · {tool['business_type']}")
-            st.write(f"**Price:** {md(tool['price_note'])}  |  **Setup:** {tool['effort']}")
-            st.write(f"**What it does well:** {md(tool['pros'])}")
-            st.write(f"**What to check:** {md(tool['cons'])}")
-            # Link, Ask Vee, and the reply are stacked in one card-width column.
-            catalog_vee_comment(tool)
-            st.caption(
-                f"Price checked {date_label(tool['checked_date'])} · "
-                f"Source: {tool['source']} · Prices and features may change."
-            )
+    # Cards go in rows of three
+    shown_rows = list(shown.iterrows())
+    for row_start in range(0, len(shown_rows), 3):
+        card_columns = st.columns(3)
+        for column, (card_number, (_, tool)) in zip(
+            card_columns, enumerate(shown_rows[row_start:row_start + 3], start=row_start)
+        ):
+            with column:
+                with st.container(key=f"catalog_card_{card_number}"):
+                    st.markdown(f"#### {tool['tool_name']}")
+                    st.write(f"**Job:** {tool['challenge']}")
+                    st.write(f"**Business:** {tool['business_type']}")
+                    st.write(f"**Price:** {md(tool['price_note'])}")
+                    st.write(f"**Setup:** {tool['effort']}")
+                    st.write(f"**What it does well:** {md(tool['pros'])}")
+                    st.write(f"**What to check:** {md(tool['cons'])}")
+                    show_tool_link(tool["website"])
+                    st.caption(f"Price checked {date_label(tool['checked_date'])}.")
+                    st.markdown(f"[Source details](https://{tool['source']})")
 
     # Comparison
     st.header("Compare up to three tools")
@@ -1219,49 +1167,14 @@ def catalog_page():
             show_tool_link(link_row["website"], name)
 
 
-# Native Streamlit navigation keeps session state when visitors change pages.
-# These use the exact same callable pages as the previous routing setup.
-home_route = st.Page(home_page, title="Home", url_path="home", default=True)
-catalog_route = st.Page(catalog_page, title="Catalog", url_path="catalog")
-about_route = st.Page(about_page, title="About the Website", url_path="about")
-page = st.navigation([home_route, catalog_route, about_route], position="hidden")
-
-# Maintain a simple, dark top bar, but replace raw anchors with internal links.
-# Existing theme colors remain unchanged throughout the rest of the application.
-st.markdown("""
-<style>
-[class*="st-key-vv_internal_nav"] {
-  position: sticky;
-  top: 0;
-  z-index: 999;
-  width: 100%;
-  background: #07171c;
-  border-bottom: 2px solid #39FF88;
-  padding: 0.35rem 0.8rem;
-  margin-bottom: 0.5rem;
-  border-radius: 0;
-}
-[class*="st-key-vv_internal_nav"] [data-testid="stPageLink"] a,
-[class*="st-key-vv_internal_nav"] a {
-  color: #e7f9f7 !important;
-  text-decoration: none !important;
-  font-weight: 600;
-}
-[class*="st-key-vv_internal_nav"] a:hover { color: #39FF88 !important; }
-</style>
-""", unsafe_allow_html=True)
-with st.container(key="vv_internal_nav"):
-    logo, home_link, catalog_link, about_link, creators_link = st.columns([2.1, 0.9, 1, 1.6, 1.6])
-    with logo:
-        st.markdown("**VipervisionAI**")
-    with home_link:
-        st.page_link(home_route, label="Home")
-    with catalog_link:
-        st.page_link(catalog_route, label="Catalog")
-    with about_link:
-        st.page_link(about_route, label="About the Website")
-    with creators_link:
-        # Creators details are also present on the About page, allowing native routing.
-        st.page_link(about_route, label="About the Creators")
-
+# Page routing. The nav bar at the top links to these pages,
+# so Streamlit's own page menu is hidden.
+page = st.navigation(
+    [
+        st.Page(home_page, title="Home", url_path="home", default=True),
+        st.Page(catalog_page, title="Catalog", url_path="catalog"),
+        st.Page(about_page, title="About the Website", url_path="about"),
+    ],
+    position="hidden",
+)
 page.run()
