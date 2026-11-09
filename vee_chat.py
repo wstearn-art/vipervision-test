@@ -12,7 +12,8 @@ import requests
 import pandas as pd
 import streamlit as st
 
-MODEL = "openai/gpt-4o-mini"
+MODEL = "openai/gpt-6-luna"
+FALLBACK_MODEL = "openai/gpt-4o-mini"
 STATE_VERSION = 3
 FIELDS = ("name", "business", "challenge", "goal", "budget", "comfort", "employees")
 QUESTIONS = {
@@ -51,7 +52,7 @@ def _record_ai_status(status, *, http_status=None, usage=None):
 
 
 def _call_ai(system, user_messages, *, max_tokens=180):
-    """Call OpenRouter; save anonymous connection status, fall back on failure."""
+    """Ask Luna first; use the existing mini model if Luna cannot answer."""
     try:
         key = st.secrets.get("OPENROUTER_API_KEY", "")
     except (KeyError, FileNotFoundError):
@@ -59,42 +60,51 @@ def _call_ai(system, user_messages, *, max_tokens=180):
     if not key:
         _record_ai_status("Missing OPENROUTER_API_KEY")
         return None
-    try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": MODEL,
-                  "messages": [{"role": "system", "content": system}] + user_messages,
-                  "temperature": 0.5, "max_tokens": max_tokens},
-            timeout=15,
-        )
-        if not response.ok:
-            # HTTP status only: never display response bodies or credentials.
-            _record_ai_status("HTTP error", http_status=response.status_code)
-            return None
-        payload = response.json()
-        choice = payload["choices"][0]
-        if choice.get("finish_reason") == "length":
-            _record_ai_status("Truncated AI response", http_status=response.status_code,
-                              usage=payload.get("usage"))
-            return None
-        message = choice["message"]["content"]
-        content = message.strip() if isinstance(message, str) else ""
-        if not content:
-            _record_ai_status("Empty AI response", http_status=response.status_code,
-                              usage=payload.get("usage"))
-            return None
-        _record_ai_status("Success", http_status=response.status_code,
-                          usage=payload.get("usage"))
-        return content
-    except requests.Timeout:
-        _record_ai_status("Request timeout")
-    except requests.RequestException:
-        _record_ai_status("Network/API connection error")
-    except (KeyError, IndexError, TypeError, ValueError):
-        _record_ai_status("Unexpected API response")
-    return None
 
+    messages = [{"role": "system", "content": system}] + user_messages
+    # Keep model selection and error handling in one place for all Vee replies.
+    for model in (MODEL, FALLBACK_MODEL):
+        try:
+            body = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max(max_tokens, 450) if model == MODEL else max_tokens,
+            }
+            if model == MODEL:
+                # Light reasoning gives Luna room to answer short business questions.
+                body["reasoning"] = {"effort": "low"}
+            else:
+                body["temperature"] = 0.5
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body, timeout=20,
+            )
+            if not response.ok:
+                _record_ai_status(f"{model}: HTTP error", http_status=response.status_code)
+                continue
+            payload = response.json()
+            choice = payload["choices"][0]
+            if choice.get("finish_reason") == "length":
+                _record_ai_status(f"{model}: Truncated response", http_status=response.status_code,
+                                  usage=payload.get("usage"))
+                continue
+            content = choice["message"]["content"]
+            content = content.strip() if isinstance(content, str) else ""
+            if not content:
+                _record_ai_status(f"{model}: Empty response", http_status=response.status_code,
+                                  usage=payload.get("usage"))
+                continue
+            _record_ai_status("Success", http_status=response.status_code, usage=payload.get("usage"))
+            st.session_state["vee_last_ai_model"] = model
+            return content
+        except requests.Timeout:
+            _record_ai_status(f"{model}: Timeout")
+        except requests.RequestException:
+            _record_ai_status(f"{model}: Connection error")
+        except (KeyError, IndexError, TypeError, ValueError):
+            _record_ai_status(f"{model}: Unexpected response")
+    return None
 
 
 def catalog_tool_commentary(tool):
@@ -175,6 +185,13 @@ def _monthly_budget(message):
     if month_matches:
         value = float(month_matches[-1].group(1) or month_matches[-1].group(2))
         return value if value <= 1000000 else None
+    # Catch a natural limit statement such as "My maximum budget is $10/month".
+    maximum = re.search(
+        r"\b(?:my|our|the)\s+(?:(?:monthly|total)\s+)?"
+        r"(?:maximum|max|limit|ceiling)\s+(?:monthly\s+)?(?:budget|spend|spending)?\s*"
+        r"(?:is|of|to|at|:)\s*\$?\s*(\d+(?:\.\d+)?)\b", text)
+    if maximum:
+        return float(maximum.group(1))
     # Look for a number directly tied to the owner's budget, not another figure.
     budget_amount = re.search(
         r"\b(?:my\s+)?(?:monthly\s+)?(?:budget|limit|maximum|max|ceiling|spend|spending|afford)\s*"
@@ -225,6 +242,10 @@ def _budget_update_intent(message):
     if re.search(r"\b(?:keep|leave|remain|stay)\b.{0,35}\b(?:budget|unchanged|same)\b", text):
         return False
     # Require an actual instruction, not the word 'budget' somewhere in a cost question.
+    # A stated maximum is a budget update, even without the word "change".
+    if re.match(r"^(?:my|our|the)\s+(?:(?:monthly|total)\s+)?"
+                r"(?:maximum|max|limit|ceiling)\s+(?:monthly\s+)?(?:budget|spend|spending)?\s+(?:is|of|to|at)\b", text):
+        return True
     return bool(re.search(
         r"^(?:(?:please|actually|okay|ok|now)\s*[,.:]?\s*)*"
         r"(?:(?:i(?:'d| would)?\s+like\s+to|i\s+want\s+to|can\s+you|please)\s+)?"
@@ -307,8 +328,13 @@ def _speak(state, next_field, observation=""):
     a = state["answers"]
     prompt = state.get("goal_question", QUESTIONS[next_field]) if next_field == "goal" else QUESTIONS[next_field]
     system = (
-        "You are Vee, a friendly, concise AI advisor for small business owners. "
-        "Write only ONE short, relevant acknowledgment of the owner's last answer. "
+        "You are Vee, a warm, observant small-business consultant with a subtle playful wit. "
+        "Sound like a capable person, not a scripted survey. Keep it direct and approachable. "
+        "Write one short, SPECIFIC insight or acknowledgment responding to the owner's last answer. "
+        "Vary the phrasing from turn to turn; sometimes notice a useful operational tradeoff "
+        "or the likely friction in the owner's workflow, but frame ideas as possibilities, not facts. "
+        "Use everyday language for beginners and slightly more precise language for experienced owners. "
+        "Keep humor light and occasional, never forced. "
         "Do not ask any question: the application will ask the next question separately. "
         "Avoid generic praise such as "
         "'That sounds exciting' or 'That is a solid budget.' Avoid filler or repetition. "
@@ -354,7 +380,7 @@ def _goal_question(state):
 def _done_message(state):
     a = state["answers"]
     system = (
-        "You are Vee, an encouraging, concise business advisor. "
+        "You are Vee, a warm, concise small-business advisor with a human voice. "
         "Write ONE warm sentence acknowledging the owner's challenge and saying "
         "you will check the existing researched catalog for possible matches. "
         "Do not mention any tool names, costs or guarantees. "
@@ -432,7 +458,9 @@ def _followup(state, user_message, ranked, tools=None):
                   "breakdown": item.get("breakdown"), "pricing": item.get("pricing")}
                  for item in ranked[:3]]
     system = (
-        "You are Vee, a practical small-business advisor. Answer briefly and accurately. "
+        "You are Vee, a thoughtful, personable small-business advisor. "
+        "Answer briefly with grounded, useful business insight and occasional light wit when natural. "
+        "Avoid canned praise, repetitive transitions and sales language. "
         "CATALOG_NAMES is the authoritative FULL catalog membership list. "
         "RELEVANT_RECORDS contains the recommended tools and any specifically named catalog tools. "
         "A tool can be listed without being suitable or affordable for this user's situation. "
@@ -931,7 +959,8 @@ def render_vee_chat(
     state["messages"].append({"role": "user", "content": reply})
 
     if state["stage"] == "done":
-        # Explicit budget corrections update structured state, not just Vee's words.
+        # Change saved budget figures only when the owner states a new limit.
+        # Questions about a product's price must never change this number.
         budget_correction = _budget_update_intent(reply)
         if budget_correction:
             new_amount = _monthly_budget(reply)

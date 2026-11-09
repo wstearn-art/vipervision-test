@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import requests
-from vee_chat import render_vee_chat
+from vee_chat import render_vee_chat, _call_ai
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
     page_icon="🔍",
@@ -573,43 +573,16 @@ def shortlist_csv(ranked):
     return pd.DataFrame(rows).to_csv(index=False)
 # This is the AI integration 
 def ai_job_from_text(text):
-    """Use OpenRouter to interpret a business problem."""
+    """Classify a problem with the same Luna-then-mini fallback as the chat."""
     if not text.strip():
         return None
+    # Keep category names tied to the researched catalog.
+    system = ("Classify this small-business problem into exactly one category: "
+              + ", ".join(JOBS) + ". Respond with only the category name.")
+    answer = _call_ai(system, [{"role": "user", "content": text}], max_tokens=80)
+    category = answer.strip() if answer else None
+    return category if category in JOBS else None
 
-    try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {st.secrets['OPENROUTER_API_KEY']}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "openai/gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Classify this small-business problem into "
-                            "exactly one of these categories: "
-                            + ", ".join(JOBS)
-                            + ". Respond with only the category name."
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
-                "temperature": 0,
-            },
-            timeout=20,
-        )
-
-        response.raise_for_status()
-        category = response.json()["choices"][0]["message"]["content"].strip()
-
-        return category if category in JOBS else None
-
-    except Exception:
-        return None
 def job_from_text(text):
     """Pick the job whose plain words appear most often in the typed text."""
     words = set(re.findall(r"[a-z]+", text.lower()))
@@ -761,18 +734,8 @@ load_css("style.css")
 
 st.markdown("<div id='top'></div>", unsafe_allow_html=True)
 
-# Nav bar locked to the top of the page
-st.markdown("""
-<div class="navbar">
-    <div class="nav-logo">VipervisionAI</div>
-    <div class="nav-links">
-        <a href="./" target="_self">Home</a>
-        <a href="./catalog" target="_self">Catalog</a>
-        <a href="./about" target="_self">About the Website</a>
-        <a href="./#about-the-creators" target="_self">About the Creators</a>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# The navigation controls are rendered below, after the pages are defined.
+# Native Streamlit links keep the chat session alive between pages.
 
 # Home page: everything except the catalog
 def home_page():
@@ -1342,14 +1305,33 @@ def catalog_page():
             show_tool_link(link_row["website"], name)
 
 
-# Page routing. The nav bar at the top links to these pages,
-# so Streamlit's own page menu is hidden.
-page = st.navigation(
-    [
-        st.Page(home_page, title="Home", url_path="home", default=True),
-        st.Page(catalog_page, title="Catalog", url_path="catalog"),
-        st.Page(about_page, title="About the Website", url_path="about"),
-    ],
-    position="hidden",
-)
+# Build the pages once so the links and the router use the same page objects.
+home_ref = st.Page(home_page, title="Home", url_path="home", default=True)
+catalog_ref = st.Page(catalog_page, title="Catalog", url_path="catalog")
+about_ref = st.Page(about_page, title="About the Website", url_path="about")
+# Register pages before rendering links to them.
+page = st.navigation([home_ref, catalog_ref, about_ref], position="hidden")
+
+# Native page links navigate without a full browser reload. This preserves Vee's chat.
+st.markdown("""
+<style>
+/* Match the website's navigation palette without changing the app layout. */
+[data-testid="stPageLink"] a { text-decoration: none; font-weight: 650; }
+[data-testid="stPageLink"] { margin-top: 0.15rem; }
+</style>
+""", unsafe_allow_html=True)
+logo_col, home_col, catalog_col, about_col, creators_col = st.columns([3, 1, 1, 1.8, 1.8], vertical_alignment="center")
+with logo_col:
+    st.markdown("**VipervisionAI**")
+with home_col:
+    st.page_link(home_ref, label="Home")
+with catalog_col:
+    st.page_link(catalog_ref, label="Catalog")
+with about_col:
+    st.page_link(about_ref, label="About the Website")
+with creators_col:
+    # Creator information lives on the Home page alongside About the Website.
+    st.page_link(home_ref, label="About the Creators")
+
+# Display the selected page after the navigation bar.
 page.run()
