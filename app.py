@@ -670,7 +670,8 @@ def home_page():
                 chosen = st.selectbox("Tool to evaluate", price_choices,
                                       index=default_choice, key="roi_tool_choice")
                 selected = next((item for item in recommended if item["name"] == chosen), None)
-                if selected and selected["cost"] is not None:
+                confirmed_cost = bool(selected and selected["cost"] is not None)
+                if confirmed_cost:
                     tool_price = float(selected["cost"])
                     st.write("**Catalog starting price:** " + md(f"${tool_price:,.2f}/month"))
                     st.caption(selected["note"])
@@ -681,6 +682,8 @@ def home_page():
                         max_value=100000.0, value=0.0, step=5.0,
                         key="roi_custom_price"))
                     if selected:
+                        if selected.get("eligibility_warning"):
+                            st.warning(selected["eligibility_warning"])
                         st.warning("Total price for this tool isn't confirmed. Enter a quote that includes required subscriptions and seats.")
 
                 c1, c2 = st.columns(2)
@@ -696,6 +699,9 @@ def home_page():
                                           key="roi_reduction")
                     st.caption("An assumption to test—not a measured AI performance claim.")
 
+                if selected and not confirmed_cost:
+                    st.caption("The $0 default in a custom estimate is not a verified free plan. "
+                               "Enter your actual total cost before using this result for a decision.")
                 monthly_time_value = hours * value * 4.33
                 estimated_savings = monthly_time_value * reduction / 100
                 estimated_net = estimated_savings - tool_price
@@ -1077,7 +1083,7 @@ def about_page():
             )
 
     st.markdown("### About the Creators")
-    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will, Team Lead.")
+    st.write("ViperVisionAI was built by The Vipers, Team 62: Usman, Natalie, and Will.")
 
 
 @st.fragment

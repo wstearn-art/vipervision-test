@@ -332,6 +332,10 @@ def _followup(state, user_message, ranked, tools=None):
         if str(tool["tool_name"]).casefold() not in shown:
             records.append({key: str(tool.get(key, "")) for key in columns})
 
+    # Product-to-product comparisons must not invent seat costs or feature tiers.
+    if ranked and re.search(r"\bcompare|comparison|versus|\bvs\.?\b", user_message, re.I):
+        return _catalog_comparison(ranked)
+
     # For literal membership questions, don't let generated text deny catalog data.
     membership = re.search(r"\b(in (?:your|the) catalog|do you (?:have|list)|is .*listed|are .*listed)\b",
                            user_message, re.I)
@@ -362,7 +366,7 @@ def _followup(state, user_message, ranked, tools=None):
         f"CATALOG_NAMES={json.dumps(known_names, ensure_ascii=False)[:1600]}. "
         f"RELEVANT_RECORDS={json.dumps(records, ensure_ascii=False)[:9000]}"
     )
-    ai = _call_ai(system, state["messages"][-8:], max_tokens=285)
+    ai = _call_ai(system, state["messages"][-8:], max_tokens=450)
     if ai:
         return ai
     if matches:
@@ -419,28 +423,66 @@ def _matching_jobs(challenge, classified_job, goal=""):
     return [classified_job] if classified_job else []
 
 
+def _hard_requirements(text):
+    """Only make exclusions for explicit, non-negotiable owner requirements.
+
+    The catalog has no verified offline or signed-BAA eligibility fields.
+    An unknown is NOT evidence of eligibility.
+    """
+    message = str(text).casefold()
+    issues = []
+    if re.search(r"\b(offline(?:[- ]only)?|without internet|no internet|no cloud|on[- ]premises?)\b", message):
+        issues.append("offline operation")
+    if re.search(r"\b(signed? baa|baa required|hipaa|patient (?:health|data|records))\b", message):
+        issues.append("health-data privacy or signed BAA")
+    return issues
+
+
+def _workflow_gap(tool, job, request):
+    """Return specific unverified functional requirements, not a numeric downgrade."""
+    text = str(request).casefold()
+    description = f"{tool.get('pros', '')} {tool.get('ai_feature', '')}".casefold()
+    if job == "Scheduling" and re.search(r"\b(staff|employees?|workers?|crew|shifts?|labor)\b", text):
+        if re.search(r"\b(schedul\w*|shifts?|roster|labor|coverage|swap\w*)\b", text):
+            if not re.search(r"employee schedul|staff schedul|shift schedul|shift swap|labor track|labor forecast|crew schedul|employee shifts?|workforce", description):
+                return "staff scheduling, shift management, or labor planning"
+    return None
+
+
+def _catalog_comparison(ranked):
+    """Deterministic comparison: exact catalog fields, no AI-invented plan tiers."""
+    if not ranked:
+        return "No eligible catalog matches are available to compare."
+    chunks = ["Here are the catalog-backed differences. These are research snapshots, not live plan verification:"]
+    for item in ranked[:3]:
+        t = item["tool"]
+        chunks.append(
+            f"**{t['tool_name']} — {item['score']}/6** (task {item['breakdown']['Job fit']}, "
+            f"price {item['breakdown']['Price fit']}, setup {item['breakdown']['Effort fit']})\n"
+            f"- Published plan notes: {t['price_note']}\n"
+            f"- Catalog strengths: {t['pros']}\n"
+            f"- Check before buying: {t['cons']}"
+        )
+    chunks.append("Confirm the exact feature tier, billing interval, user count, and total cost with each provider. "
+                  "A higher catalog score is not proof that a product meets every operational requirement.")
+    return "\n\n".join(chunks)
+
+
 def _rank_jobs(pool, jobs, cap, comfort, score_tools, challenge="", goal=""):
-    """Rank catalog matches and discount weak workflow fits for employee shifts."""
+    """Return only catalog-verified job fits; never award points for unmet hard requirements."""
     candidates = {}
-    request = f"{challenge} {goal}".casefold()
-    employee_shifts = bool(re.search(r"\b(staff|employees?|workers?|crew|shifts?|labor costs?|shift swaps?)\b", request)
-                           and re.search(r"\b(schedul\w*|shifts?|roster|labor|coverage|swap\w*)\b", request))
+    request = f"{challenge} {goal}"
+    if _hard_requirements(request):
+        # The current CSV cannot verify offline use or signed BAAs for any tool.
+        return []
     for job in jobs:
         for original in score_tools(pool, job, cap, comfort):
+            tool = original["tool"]
+            if _workflow_gap(tool, job, request):
+                continue
             item = dict(original)
             item["breakdown"] = dict(original["breakdown"])
             item["reasons"] = list(original["reasons"])
-            tool = item["tool"]
-            if job == "Scheduling" and employee_shifts:
-                description = f"{tool.get('pros', '')} {tool.get('ai_feature', '')}".casefold()
-                workforce_feature = bool(re.search(
-                    r"employee schedul|staff schedul|shift schedul|shift swap|labor track|"
-                    r"labor forecast|crew schedul|employee shifts?|workforce", description))
-                if not workforce_feature:
-                    # A general personal calendar is not a verified staffing scheduler.
-                    item["score"] -= 2
-                    item["breakdown"]["Job fit"] -= 2
-                    item["reasons"].append("Only a broad scheduling match; employee shift support not verified")
             key = str(tool["tool_name"])
             if key not in candidates or item["score"] > candidates[key]["score"]:
                 candidates[key] = item
@@ -505,7 +547,8 @@ def _send_guided_followup(state, prompt, ranked, *, source_key):
     """
     state["messages"].append({"role": "user", "content": prompt})
     with st.spinner("Vee is preparing your answer..."):
-        response = _followup(state, prompt, ranked, st.session_state.get("vee_catalog_data"))
+        response = (_catalog_comparison(ranked) if source_key == "comparison" else
+                    _followup(state, prompt, ranked, st.session_state.get("vee_catalog_data")))
     state["messages"].append({"role": "assistant", "content": response})
     st.session_state["vee_inline_followup"] = {
         "source": source_key, "response": response,
@@ -674,10 +717,19 @@ def render_vee_chat(
                 # A per-seat, add-on, or quote price is not a confirmed total.
                 needs_quote = bool(re.search(r"per seat|/seat|add.on|quote|per location", price_note, re.I))
                 has_free = free is not None and not pd.isna(free) and float(free) == 0
-                cost = (0.0 if has_free else None if needs_quote else
-                        float(monthly) if monthly is not None and not pd.isna(monthly) else None)
+                free_limit = re.search(r"(?:free|lite)[^.;]*?\b(?:1|one)\s+users?\b|"
+                                       r"\b(?:1|one)\s+users?\b", price_note, re.I)
+                employees = int(a.get("employees") or 1)
+                team_plan_unverified = bool(has_free and employees > 1 and free_limit)
+                # Total cost for more than one seat/unknown plan must be entered manually.
+                cost = (None if team_plan_unverified or needs_quote else
+                        0.0 if has_free else float(monthly)
+                        if monthly is not None and not pd.isna(monthly) else None)
                 roi_candidates.append({"name": str(tool["tool_name"]), "cost": cost,
-                                       "note": str(tool.get("price_note", ""))})
+                                       "note": str(tool.get("price_note", "")),
+                                       "eligibility_warning": ("The listed free plan is single-user; "
+                                                               "it is not a verified total price for this team."
+                                                               if team_plan_unverified else "")})
             st.session_state["vee_roi_candidates"] = roi_candidates
             budget_display = ("No budget ceiling" if a["budget_amount"] == float("inf")
                               else f"Budget up to ${a['budget_amount']:,.0f}/month")
@@ -693,6 +745,7 @@ def render_vee_chat(
                 )
                 if st.button("Update budget and refresh recommendations", key="vee_budget_apply"):
                     a["budget_amount"] = float(budget_entry)
+                    st.session_state.pop("vee_inline_followup", None)
                     a["budget"] = _budget_label(float(budget_entry), budget_cap)
                     state["messages"].append({"role": "assistant", "content":
                         f"Budget updated to ${budget_entry:,.0f} per month. I've refreshed the recommendations."})
@@ -704,8 +757,20 @@ def render_vee_chat(
                 else "business intent rules." if state["classification_source"] == "Catalog intent rules"
                 else "keyword matching."))
             if not ranked:
-                st.info("No catalog candidates meet both this challenge and your exact monthly budget. "
-                        "Ask Vee in the chat above what to consider next, or start a new conversation.")
+                hard = _hard_requirements(f"{a.get('challenge', '')} {a.get('goal', '')}")
+                if hard:
+                    st.warning("No verified match: our catalog does not establish " +
+                               ", ".join(hard) + ". An unknown requirement is not a confirmed fit.")
+                else:
+                    st.info("No verified catalog tools match this specific workflow within your "
+                            "budget. This doesn't mean no solution exists; our researched catalog has limits.")
+                st.write("**Ways to proceed:**")
+                st.write("- Separate the most urgent workflow from secondary needs (for example, "
+                         "crew dispatch versus answering customer calls).")
+                st.write("- Review the catalog for tools addressing the secondary task; "
+                         "don't treat those tools as replacements for the main requirement.")
+                st.write("- Check the provider directly for required features, total cost, and compliance before buying.")
+                st.caption("You can also clarify your main task or change your budget using the controls above.")
             else:
                 for index, item in enumerate(ranked[:3], start=1):
                     _result_card(item, index, a["employees"], cross_industry, a, state, ranked)
@@ -733,6 +798,7 @@ def render_vee_chat(
             new_amount = _monthly_budget(reply)
             if new_amount is not None:
                 a["budget_amount"] = new_amount
+                st.session_state.pop("vee_inline_followup", None)
                 a["budget"] = _budget_label(new_amount, budget_cap)
                 summary = ("unlimited" if new_amount == float("inf") else f"${new_amount:,.0f}/month")
                 answer = (f"I've updated your monthly budget to {summary}. "
