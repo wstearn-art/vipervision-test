@@ -686,7 +686,7 @@ def render_vee_chat(
     st.session_state["vee_roi_candidates"] = []
     if state["stage"] == "done":
         st.divider()
-        st.markdown(f"### A few options for {a.get('name', 'you')}")
+        st.markdown("## Your AI Recommendations")
         if a.get("job") is None:
             st.info("I couldn't confidently connect that challenge to a researched catalog category. "
                     "You can clarify the problem in the chat above.")
