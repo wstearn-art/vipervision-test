@@ -1,6 +1,6 @@
 """ViperVision Vee: AI-led business conversation with catalog-grounded results.
 
-Drop-in replacement for the original vee_chat.py; app.py remains unchanged.
+
 OpenRouter creates conversational replies; Python validates inputs and ranks only
 verified catalog entries. If AI is unavailable, the intake still works.
 """
