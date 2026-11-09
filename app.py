@@ -120,7 +120,7 @@ def show_table(data):
         st.dataframe(data, use_container_width=True, hide_index=True)
 
 @st.cache_data
-def load_tools(path):
+def load_tools(path, catalog_revision=None):
     data = pd.read_csv(path)
     missing = [column for column in REQUIRED_COLUMNS if column not in data.columns]
     if missing:
@@ -136,7 +136,7 @@ def load_tools(path):
     return data
 
 try:
-    tools = load_tools(DATA_FILE)
+    tools = load_tools(DATA_FILE, (DATA_FILE.stat().st_mtime_ns, DATA_FILE.stat().st_size))
 except (FileNotFoundError, pd.errors.ParserError, ValueError) as error:
     st.error("The tool catalog could not be loaded. Check ai_tools.csv and try again.")
     st.caption(str(error))
@@ -146,10 +146,10 @@ newest_check = pd.to_datetime(tools["checked_date"], errors="coerce").max()
 if pd.notna(newest_check):
     PRICE_CHECK_DATE = date_label(newest_check)
 
-if len(tools) != EXPECTED_TOOL_COUNT:
+if len(tools) < EXPECTED_TOOL_COUNT:
     st.warning(
-        f"The catalog currently contains {len(tools)} tools. "
-        f"The contest demonstration expects {EXPECTED_TOOL_COUNT}."
+        f"The catalog currently contains {len(tools)} tools; "
+        f"the original baseline contained {EXPECTED_TOOL_COUNT}."
     )
 
 def business_tools(data, business_type):
@@ -176,36 +176,199 @@ def starting_cost(tool):
         return None
     return float(tool["monthly_cost"])
 
-def score_tools(data, job, cap, comfort):
-    """Explainable rule based score: job fit 3, price fit 2, effort fit 1."""
+def evaluate_plan_cost(tool, requirements=None):
+    """Conservative, catalog-specific monthly cost assessment for recommendations and ROI.
+
+    'confirmed' means the documented tier covers the KNOWN requirements, not a
+    live provider quote. 'unknown' NEVER means free; 'ineligible' means the
+    documented minimum is already over budget. Only the catalog is consulted.
+    """
+    req = requirements or {}
+    name = str(tool.get("tool_name", ""))
+    note = str(tool.get("price_note", ""))
+    cap = req.get("budget", float("inf"))
+    seats = req.get("seats")
+    locations = req.get("locations") or 1
+    usage = req.get("monthly_usage")
+    usage_unit = str(req.get("usage_unit") or "")
+    monthly_only = bool(req.get("monthly_billing_only"))
+    free = pd.notna(tool.get("free_price")) and float(tool["free_price"]) == 0
+    base = None if pd.isna(tool.get("monthly_cost")) else float(tool["monthly_cost"])
+
+    cost = None
+    plan = "Catalog starting option"
+    reasons = []
+    # These are explicitly documented plan conditions from the supplied CSV.
+    if name == "Intercom Fin AI Agent":
+        plan = "Fin usage-based outcomes (base subscription additional/uncertain)"
+        if usage is not None and usage_unit in ("outcomes", "resolved_questions", "inquiries"):
+            minimum = 0.99 * usage
+            reasons.append(f"{usage:g} resolved outcomes at $0.99 each cost at least ${minimum:,.2f}, before seats/base plans")
+            if minimum > cap:
+                return {"status": "ineligible", "cost": None, "lower_bound": minimum,
+                        "plan": plan, "reason": "; ".join(reasons)}
+        reasons.append("Final total depends on resolved outcomes and required base/seat charges")
+    elif name == "Tidio Lyro AI":
+        plan = "Lyro 50-conversation starting tier"
+        if usage is not None and usage_unit in ("conversations", "inquiries", "resolved_questions", "outcomes") and usage > 50:
+            reasons.append(f"{usage:g} conversations exceed the 50-conversation starting tier")
+        else:
+            reasons.append("AI conversation limits and eligible plan must be verified before pricing the workload")
+    elif name == "Goodcall":
+        plan = "Starter with 100 unique customers"
+        if usage is not None and usage_unit in ("callers", "customers", "unique_customers"):
+            cost = 79 + max(0, usage - 100) * 0.79
+            reasons.append(f"{usage:g} unique customers; 100 included, $0.79 each additional")
+        else:
+            reasons.append("Number of unique customers needed to determine overages")
+    elif name == "Reclaim AI":
+        if seats is None:
+            reasons.append("Number of software seats unknown; free Lite is one user only")
+        elif seats == 1:
+            cost = 0.0
+            plan = "Lite free, one user"
+        elif 2 <= seats <= 10:
+            cost = 12.0 * seats if monthly_only else None
+            plan = "Starter, up to 10 users"
+            if not monthly_only:
+                reasons.append("Starter price depends on monthly versus annual billing ($12 monthly; $10 annual per seat)")
+        else:
+            reasons.append("Starter is limited to 10 users; an eligible higher tier is not priced here")
+    elif name == "7shifts":
+        plan = "Premium advanced forecasting"
+        cost = 149.99 * locations
+        reasons.append(f"${149.99:,.2f} per location across {locations} location(s)")
+    elif name == "Cactus AI":
+        plan = "Growth (AI forecasting features)"
+        cost = 149.0 * locations
+        reasons.append(f"$149 per location across {locations} location(s)")
+    elif name == "SiteRecon Scout AI":
+        plan = "Scout paid credits"
+        if usage is not None and usage_unit in ("property_acre_credits", "credits"):
+            if usage <= 20:
+                cost = 39.0
+                plan = "Scout 20 property-acre credits"
+            elif usage <= 50:
+                cost = 79.0
+                plan = "Scout 50 property-acre credits"
+            else:
+                reasons.append("More than 50 credits; higher-volume cost not in catalog")
+        else:
+            reasons.append("Property-acre credit need unknown; free two-measurement offer does not establish paid-credit eligibility")
+    elif name == "Buffer AI Assistant":
+        plan = "Free: three channels; 10 queued posts per channel"
+        channels = req.get("channels")
+        if channels is not None and channels <= 3:
+            cost = 0.0
+        else:
+            # The catalog lists $5/channel as annual equivalent, not monthly-billed.
+            reasons.append("Free plan covers up to three channels; confirm channels and queue requirements")
+        if monthly_only and cost is None:
+            reasons.append("$5/channel figure is annually billed; monthly-billed price is not in catalog")
+    elif name == "Copy.ai":
+        plan = "Chat, 5 included seats"
+        if seats is None:
+            reasons.append("Number of required software seats not established (five included)")
+        elif seats > 5:
+            reasons.append("Requested software seats exceed five included Chat seats")
+        else:
+            cost = 29.0
+    elif name == "Calendly Callie":
+        plan = "Callie AI bundle plus eligible per-seat plan"
+        reasons.append("$18/seat and $8 AI add-on are annual prices; monthly AI bundle cost unverified")
+    elif name == "Jobber AI Receptionist":
+        plan = "AI Receptionist add-on"
+        reasons.append("$29 add-on requires a qualifying Jobber subscription; total unknown")
+    elif name == "Canva AI":
+        plan = "Limited free AI use"
+        reasons.append("Free AI allowance and monthly-billed price not confirmed for stated output needs")
+    elif name == "Canva Magic Studio":
+        plan = "Free with limited AI operations"
+        # Do not claim free covers a business's requested output volume.
+        reasons.append("Free AI usage allowance may not cover the required content volume")
+    elif name == "Predis.ai":
+        plan = "Core monthly, limited generation credits"
+        reasons.append("Generation credit needs not established; Core does not include auto-posting")
+    elif name == "Dext AI Assist":
+        plan = "Base subscription plus AI Assist"
+        cost = 42.0
+    elif name == "Jasper":
+        plan = "Pro per software seat"
+        if seats is not None:
+            cost = 69.0 * seats
+        else:
+            reasons.append("Per-seat subscription; required seat count unknown")
+    elif name == "CafeSquad AI":
+        plan = "Growth, 30 AI review drafts"
+        if usage is not None and usage_unit in ("drafts", "reviews") and usage > 30:
+            reasons.append("Requested draft volume exceeds 30 included Growth drafts")
+        else:
+            cost = 299.0
+    elif name == "Podium AI":
+        plan = "Core annual commitment plus 10DLC fee"
+        if not monthly_only:
+            reasons.append("Published $399 base plus $5 10DLC; annual commitment required")
+        else:
+            reasons.append("12-month commitment conflicts with monthly-only preference")
+    elif name == "Neighborbrite":
+        plan = "Landscaper estimate workflow"
+        cost = 149.0 if "estimat" in str(req.get("task_text", "")).lower() else 49.0
+    elif name == "ChatGPT":
+        plan = "Free or Plus general assistant"
+        cost = 0.0
+    elif name == "Birdeye Reviews AI" or name == "PreciTaste":
+        reasons.append("Quote-only deployment; no verified monthly total")
+    elif free:
+        reasons.append("Free tier available but eligibility for the requested capabilities is not established")
+    elif base is not None:
+        # Only fixed, unqualified monthly catalog prices are confidently usable.
+        if not re.search(r"per.seat|/seat|per.location|/location|usage|additional|add.on|annual|billed|credit|conversation|outcome|customer|quote", note, re.I):
+            cost = base
+        else:
+            reasons.append("Starting figure has plan, billing, seat, or usage conditions")
+    else:
+        reasons.append("No verified monthly price in the catalog")
+
+    if cost is None:
+        return {"status": "unknown", "cost": None, "lower_bound": None,
+                "plan": plan, "reason": "; ".join(reasons) or "Applicable total monthly cost unverified"}
+    if cost > cap:
+        return {"status": "ineligible", "cost": cost, "lower_bound": cost,
+                "plan": plan, "reason": "; ".join(reasons) or "Required plan exceeds budget"}
+    return {"status": "confirmed", "cost": cost, "lower_bound": cost,
+            "plan": plan, "reason": "; ".join(reasons) or "Catalog-priced plan fits the known requirements"}
+
+
+def score_tools(data, job, cap, comfort, requirements=None):
+    """Explainable job 3 / price 2 / effort 1, with contextual cost checks."""
     scored = []
     for _, row in data.iterrows():
         if row["challenge"] != job:
             continue
-
-        if not price_fits(row, cap):
+        pricing = None
+        if requirements is not None:
+            pricing = evaluate_plan_cost(row, {**requirements, "budget": cap})
+            if pricing["status"] == "ineligible":
+                continue
+            if cap == 0 and pricing["status"] != "confirmed":
+                continue
+        elif not price_fits(row, cap):
             continue
 
         score = 3
-        breakdown = {
-            "Job fit": 3,
-            "Price fit": 0,
-            "Effort fit": 0,
-        }
-        reasons = [f"Matches your job: {job}"]
-        if price_fits(row, cap):
+        breakdown = {"Job fit": 3, "Price fit": 0, "Effort fit": 0}
+        reasons = [f"Matches catalog job: {job}"]
+        if pricing is not None:
+            if pricing["status"] == "confirmed":
+                score += 2
+                breakdown["Price fit"] = 2
+                reasons.append(f"Applicable catalog plan: {pricing['plan']} (${pricing['cost']:,.2f}/month)")
+            else:
+                reasons.append("Total price/plan eligibility not verified; budget fit remains unknown")
+        elif price_fits(row, cap):
             score += 2
             breakdown["Price fit"] = 2
-            if pd.notna(row["free_price"]) and row["free_price"] == 0:
-                reasons.append("Has a free starting option")
-            else:
-                reasons.append(
-                    f"Published monthly price is ${float(row['monthly_cost']):,.2f}"
-                )
-        elif pd.isna(row["monthly_cost"]):
-            reasons.append("Price is quote only, so budget fit cannot be confirmed")
-        else:
-            reasons.append("Published starting price is above your selected budget")
+            reasons.append("Published starting option fits the selected budget; plan terms may apply")
         if row["effort"] == "Easy":
             score += 1
             breakdown["Effort fit"] = 1
@@ -216,15 +379,8 @@ def score_tools(data, job, cap, comfort):
             reasons.append("Medium setup matches your comfort level")
         elif row["effort"] == "Medium":
             reasons.append("Setup is medium and may need extra learning")
-        scored.append(
-            {
-                "score": score,
-                "tool": row,
-                "reasons": reasons,
-                "breakdown": breakdown,
-            }
-        )
-    # Stable alphabetical order makes equal scores reproducible.
+        scored.append({"score": score, "tool": row, "reasons": reasons,
+                       "breakdown": breakdown, "pricing": pricing})
     scored.sort(key=lambda item: (-item["score"], str(item["tool"]["tool_name"]).casefold()))
     return scored
 
@@ -659,6 +815,7 @@ def home_page():
                 comfort_options=COMFORT_OPTIONS,
                 business_tools=business_tools,
                 score_tools=score_tools,
+                evaluate_plan_cost=evaluate_plan_cost,
                 show_tool_result=show_tool_result,
                 ai_job_from_text=ai_job_from_text,
                 job_from_text=job_from_text,
@@ -678,18 +835,32 @@ def home_page():
                 chosen = st.selectbox("Tool to evaluate", price_choices,
                                       index=default_choice, key="roi_tool_choice")
                 selected = next((item for item in recommended if item["name"] == chosen), None)
-                if selected and selected["cost"] is not None:
+                cost_known = bool(selected and selected["cost"] is not None)
+                if cost_known:
                     tool_price = float(selected["cost"])
-                    st.write("**Catalog starting price:** " + md(f"${tool_price:,.2f}/month"))
+                    st.write("**Catalog plan cost for known requirements:** " + md(f"${tool_price:,.2f}/month"))
+                    if selected.get("plan"):
+                        st.caption("Assessed plan: " + selected["plan"])
                     st.caption(selected["note"])
-                    st.caption("Change the selection to 'Enter my own cost' to model a different plan or seat count.")
+                    st.caption("Choose 'Enter my own cost' to model a different total.")
                 else:
+                    # Unknown is not zero. Explicit owner confirmation is necessary
+                    # before calculating a net estimate, even if the entered value is $0.
+                    profile = vee_state.get("answers", {})
+                    custom_key = "roi_custom_" + repr((chosen, profile.get("budget_amount"),
+                        profile.get("employees"), profile.get("challenge"), profile.get("goal")))
                     tool_price = float(st.number_input(
-                        "Estimated total monthly tool cost ($)", min_value=0.0,
+                        "Estimated TOTAL monthly tool cost ($)", min_value=0.0,
                         max_value=100000.0, value=0.0, step=5.0,
-                        key="roi_custom_price"))
+                        key=custom_key))
+                    cost_known = st.checkbox(
+                        "Use this amount as my own scenario assumption",
+                        value=False, key=custom_key + "_confirmed")
                     if selected:
-                        st.warning("Total price for this tool isn't confirmed. Enter a quote that includes required subscriptions and seats.")
+                        st.warning(selected.get("eligibility_warning") or
+                                   "Total price isn't confirmed. Include seats, usage and required subscriptions.")
+                    if not cost_known:
+                        st.info("Net savings and break-even will appear once you confirm an estimated total cost.")
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -706,22 +877,24 @@ def home_page():
 
                 monthly_time_value = hours * value * 4.33
                 estimated_savings = monthly_time_value * reduction / 100
-                estimated_net = estimated_savings - tool_price
+                estimated_net = estimated_savings - tool_price if cost_known else None
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Time value/month", money(monthly_time_value))
                 with m2:
                     st.metric("Potential savings/month", money(estimated_savings))
                 with m3:
-                    st.metric("Estimated net/month", money(estimated_net))
-                if tool_price > 0 and monthly_time_value > 0:
+                    st.metric("Estimated net/month", money(estimated_net) if cost_known else "Not yet calculated")
+                if cost_known and tool_price > 0 and monthly_time_value > 0:
                     needed = tool_price / monthly_time_value * 100
                     if needed <= 100:
                         st.caption(f"Break-even requires about {needed:.0f}% time savings at these inputs.")
                     else:
                         st.warning("This tool's modeled cost exceeds the full monthly value of the task.")
-                if estimated_net < 0:
+                if cost_known and estimated_net < 0:
                     st.warning("At these assumptions, costs exceed estimated time savings.")
+                if not cost_known:
+                    st.caption("Potential savings exclude software costs; this is NOT a net ROI estimate.")
                 st.caption("Assumes 4.33 weeks/month. Excludes onboarding, taxes, usage fees, "
                            "additional seats and other costs. Confirm actual pricing and measure savings before purchase.")
 
