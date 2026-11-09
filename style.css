@@ -730,7 +730,19 @@ div[class*="st-key-catalog_card"] {
     border: 1px solid var(--accent-color-blue);
     border-radius: 16px;
     padding: 22px;
-    margin-bottom: 16px;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+/*Three cards per row, each row the same height with space between rows*/
+div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-catalog_card"]) {
+    align-items: stretch;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-catalog_card"]) > div[data-testid="stColumn"] div:has(div[class*="st-key-catalog_card"]) {
+    height: 100%;
 }
 
 /*White text and titles inside the catalog cards*/
