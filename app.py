@@ -650,18 +650,20 @@ def home_page():
             else:
                 st.markdown("#### Vee, your guide")
     with greet_col:
-        render_vee_chat(
-            tools=tools,
-            business_types=BUSINESS_TYPES,
-            budget_cap=BUDGET_CAP,
-            comfort_options=COMFORT_OPTIONS,
-            business_tools=business_tools,
-            score_tools=score_tools,
-            show_tool_result=show_tool_result,
-            ai_job_from_text=ai_job_from_text,
-            job_from_text=job_from_text,
-            vee_avatar=vee_avatar,
-        )
+        # Yellow ombre box around the Chat with Vee area
+        with st.container(key="vee_chat_box"):
+            render_vee_chat(
+                tools=tools,
+                business_types=BUSINESS_TYPES,
+                budget_cap=BUDGET_CAP,
+                comfort_options=COMFORT_OPTIONS,
+                business_tools=business_tools,
+                score_tools=score_tools,
+                show_tool_result=show_tool_result,
+                ai_job_from_text=ai_job_from_text,
+                job_from_text=job_from_text,
+                vee_avatar=vee_avatar,
+            )
 
         # Once the first chat with Vee is done, the ROI calculator shows right under it
         vee_state = st.session_state.get("vee_guided", {})
