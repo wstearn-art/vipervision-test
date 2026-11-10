@@ -4,12 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import requests
 from vee_chat import render_vee_chat, _call_ai
 from recommendation_engine import (
     evaluate_tool as engine_evaluate_tool, load_plan_catalog,
-    required_capabilities, research_leads as engine_research_leads,
-    score_tools as engine_score_tools, split_requirements,
+    research_leads as engine_research_leads, score_tools as engine_score_tools,
+    split_requirements,
 )
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
@@ -175,22 +174,6 @@ def business_tools(data, business_type):
         )
     ].copy()
 
-def price_fits(row, cap):
-    """Check whether a published free starting option or monthly price fits."""
-    if pd.notna(row["free_price"]) and row["free_price"] == 0:
-        return True
-    if pd.isna(row["monthly_cost"]):
-        return False
-    return float(row["monthly_cost"]) <= cap
-
-def starting_cost(tool):
-    """Monthly cost to start: zero for a free start, else the published price."""
-    if pd.notna(tool["free_price"]) and tool["free_price"] == 0:
-        return 0.0
-    if pd.isna(tool["monthly_cost"]):
-        return None
-    return float(tool["monthly_cost"])
-
 def evaluate_plan_cost(tool, requirements=None):
     """Evaluate the lowest evidence-backed plan that covers required capabilities."""
     req = dict(requirements or {})
@@ -242,27 +225,31 @@ def run_scorer_checks(data):
     """Check fit classes, affordability gates, ordering, and explanations."""
     total = 0
     passed = 0
-    for business_type in BUSINESS_TYPES:
-        pool = data
-        for job in JOBS:
-            for cap in BUDGET_CAP.values():
-                for comfort in COMFORT_OPTIONS:
-                    ranked = score_tools(pool, job, cap, comfort)
-                    classes = [item["fit_classification"] for item in ranked]
-                    ok = (
-                        all(label in {"Strong Fit", "Partial Fit"} for label in classes)
-                        and classes == sorted(classes, key=lambda label: 0 if label == "Strong Fit" else 1)
-                        and all(item["pricing"]["status"] == "confirmed" for item in ranked)
-                        and all(item["reasons"] for item in ranked)
-                    )
-                    total += 1
-                    passed += int(ok)
+    for job in JOBS:
+        for cap in BUDGET_CAP.values():
+            for comfort in COMFORT_OPTIONS:
+                ranked = score_tools(data, job, cap, comfort)
+                classes = [item["fit_classification"] for item in ranked]
+                ok = (
+                    all(label in {"Strong Fit", "Partial Fit"} for label in classes)
+                    and classes == sorted(classes, key=lambda label: 0 if label == "Strong Fit" else 1)
+                    and all(item["pricing"]["status"] == "confirmed" for item in ranked)
+                    and all(item["reasons"] for item in ranked)
+                )
+                total += 1
+                passed += int(ok)
     return passed, total
 
+def vee_avatar():
+    return str(VEE_FILE) if VEE_FILE.exists() else "assistant"
+
+def show_tool_link(url, name=None):
+    """Display a readable link without exposing a raw URL as page text."""
+    label = f"Visit {name} website" if name else "Visit provider website"
+    st.markdown(f"[{label}]({url})")
+
 def team_size_note(tool, employees):
-    """Compare team size with a free plan limit stated in the catalog price note.
-    This note is informational and does not change the fit class.
-    """
+    """Describe a free-plan team limit when the catalog publishes one."""
     match = re.search(r"Free up to (\d+) (team members|employees)", str(tool["price_note"]))
     if not match:
         return None
@@ -273,14 +260,6 @@ def team_size_note(tool, employees):
         f"The free plan covers up to {limit} {match.group(2)}, and your team of "
         f"{employees} is above that, so expect to need a paid plan."
     )
-
-def vee_avatar():
-    return str(VEE_FILE) if VEE_FILE.exists() else "assistant"
-
-def show_tool_link(url, name=None):
-    """Display a readable link without exposing a raw URL as page text."""
-    label = f"Visit {name} website" if name else "Visit provider website"
-    st.markdown(f"[{label}]({url})")
 
 def show_tool_result(item, number, employees=None):
     tool = item["tool"]
@@ -302,114 +281,6 @@ def show_tool_result(item, number, employees=None):
     )
     st.markdown(f"[Source details](https://{tool['source']})")
 
-def show_first_week_plan(tool, systems=""):
-    st.subheader(f"Your first week with {tool['tool_name']}")
-    st.write(
-        "1. Visit the provider website and review the current plan and terms. "
-        f"Catalog price note: {md(tool['price_note'])}."
-    )
-    if systems.strip():
-        st.write(
-            "2. Ask the provider whether it works with the systems you already "
-            f"use: {md(systems.strip())}."
-        )
-    else:
-        st.write("2. Check whether the tool works with the systems your business already uses.")
-    st.write("3. Test one real task with a small amount of work before relying on it.")
-    st.write(
-        "4. After seven days, compare the time saved and the actual cost. "
-        f"Keep this in mind: {md(tool['cons'])}."
-    )
-    st.caption(
-        "This is an adoption checklist. VipervisionAI does not create accounts, "
-        "connect systems, or purchase tools for you."
-    )
-
-def build_starter_stack(pool, cap, comfort, first_job):
-    """Top budget fit tool for up to three different jobs, same rules as the quiz.
-    The job you picked comes first, then the other jobs in catalog order.
-    """
-    order = [first_job] + [job for job in JOBS if job != first_job]
-    stack = []
-    for job in order:
-        ranked = score_tools(pool, job, cap, comfort)
-        if ranked and ranked[0]["fit_classification"] in {"Strong Fit", "Partial Fit"}:
-            stack.append({"job": job, "item": ranked[0]})
-        if len(stack) == 3:
-            break
-    return stack
-
-def show_starter_stack(pool, budget_label, comfort, first_job):
-    cap = BUDGET_CAP[budget_label]
-    stack = build_starter_stack(pool, cap, comfort, first_job)
-    st.subheader("Your starter stack")
-    if not stack:
-        st.info("No catalog tools fit your budget for a starter stack. Try a higher budget.")
-        return
-    st.write(
-        "One top tool for each of up to three different jobs, starting with your "
-        "job and classified with the same rules as your quiz answers. Only affordable tools that "
-        "fit your budget are included."
-    )
-    start_total = 0.0
-    rows = []
-    for entry in stack:
-        tool = entry["item"]["tool"]
-        pricing = entry["item"]["pricing"]
-        st.write(
-            f"**{tool['tool_name']}** for {entry['job']}: "
-            f"{pricing['plan']} at ${pricing['cost']:,.2f}/month — "
-            f"{entry['item']['fit_classification']}."
-        )
-        show_tool_link(tool["website"], tool["tool_name"])
-        start_cost = pricing["cost"]
-        start_total += start_cost or 0.0
-        rows.append(
-            {
-                "Tool": tool["tool_name"],
-                "Job": entry["job"],
-                "Selected plan": pricing["plan"],
-                "Price": tool["price_note"],
-                "Verified monthly plan cost": start_cost,
-                "Website": tool["website"],
-            }
-        )
-    st.write(f"Estimated monthly total to start: ${start_total:,.0f}.")
-    if cap != float("inf"):
-        if start_total <= cap:
-            st.success(f"The starting total is within your budget of {md(budget_label)}.")
-        else:
-            st.warning(f"The starting total is above your budget of {md(budget_label)}.")
-    st.caption(
-        "Totals use the selected eligible plan and verified required charges. "
-        "The plan notes show any remaining limits or terms."
-    )
-    stack_csv = pd.DataFrame(rows).to_csv(index=False)
-    st.download_button(
-        "Download your starter stack",
-        data=stack_csv,
-        file_name="vipervision_starter_stack.csv",
-        mime="text/csv",
-    )
-
-def shortlist_csv(ranked):
-    rows = []
-    for number, item in enumerate(ranked[:3], start=1):
-        tool = item["tool"]
-        rows.append(
-            {
-                "Rank": number,
-                "Tool": tool["tool_name"],
-                "Fit classification": item["fit_classification"],
-                "Selected plan": item["plan"],
-                "Verified monthly cost": item["pricing"]["cost"],
-                "Price": tool["price_note"],
-                "Setup": tool["effort"],
-                "Why it matched": "; ".join(item["reasons"]),
-                "Website": tool["website"],
-            }
-        )
-    return pd.DataFrame(rows).to_csv(index=False)
 # This is the AI integration 
 def ai_job_from_text(text):
     """Classify a problem with the same Luna-then-mini fallback as the chat."""
@@ -434,47 +305,24 @@ def job_from_text(text):
             best_hits = hits
     return best_job
 
-def show_chat_answer(answer):
-    job = answer["job"]
-    with st.chat_message("user"):
-        if answer["typed"]:
-            st.write(md(answer["text"]))
-        st.write(
-            f"I run a {answer['business']}. My job is {job}. "
-            f"My budget is {md(answer['budget'])}. My comfort level is "
-            f"{answer['comfort'].lower()}."
+def shortlist_csv(ranked):
+    rows = []
+    for number, item in enumerate(ranked[:3], start=1):
+        tool = item["tool"]
+        rows.append(
+            {
+                "Rank": number,
+                "Tool": tool["tool_name"],
+                "Fit classification": item["fit_classification"],
+                "Selected plan": item["plan"],
+                "Verified monthly cost": item["pricing"]["cost"],
+                "Price": tool["price_note"],
+                "Setup": tool["effort"],
+                "Why it matched": "; ".join(item["reasons"]),
+                "Website": tool["website"],
+            }
         )
-    with st.chat_message("assistant", avatar=vee_avatar()):
-        if answer["typed"] and answer["understood"]:
-            st.write(f"I read your message as the job {job}.")
-        elif answer["typed"]:
-            st.write(
-                "I could not match your words to a catalog job, so I used the "
-                f"job you chose in the list: {job}."
-            )
-        pool = tools
-        ranked = score_tools(pool, job, BUDGET_CAP[answer["budget"]], answer["comfort"])
-        if ranked:
-            st.write("Here are the strongest catalog matches for your answers.")
-            for index, item in enumerate(ranked[:3], start=1):
-                with st.container(border=True):
-                    show_tool_result(item, index)
-        else:
-            st.info(
-                "I found no catalog match for that job and business type. "
-                "Try another job to explore the current tools."
-            )
-
-def clear_results():
-    st.session_state.pop("recommendation_results", None)
-
-def fill_roi_price():
-    choice = st.session_state.get("roi_tool", "My own number")
-    if choice == "My own number":
-        return
-    row = tools[tools["tool_name"] == choice].iloc[0]
-    if pd.notna(row["monthly_cost"]):
-        st.session_state["roi_price"] = int(round(float(row["monthly_cost"])))
+    return pd.DataFrame(rows).to_csv(index=False)
 
 # The three explore cards. Tool names and counts come straight from the catalog.
 EXPLORE_CARDS = [
@@ -574,6 +422,43 @@ load_css("style.css")
 # Keep card buttons level, even when descriptions or tool lists differ.
 CARD_LAYOUT_FIX = """
 <style>
+/* Center Vee and the chat panel as one desktop composition. */
+.st-key-vee_home_layout {
+    max-width: 1120px;
+    margin: 0 auto;
+}
+.st-key-vee_home_layout [data-testid="stHorizontalBlock"] {
+    align-items: flex-start !important;
+    gap: clamp(1rem, 3vw, 2.25rem);
+}
+.st-key-vee_home_layout .st-key-vee_image {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+    align-self: flex-start !important;
+}
+.st-key-vee_home_layout .st-key-vee_image img {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    height: auto;
+    margin: 0 auto;
+}
+.st-key-vee_home_layout .st-key-vee_chat_box {
+    width: 100%;
+}
+@media (max-width: 768px) {
+    .st-key-vee_home_layout [data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+    }
+    .st-key-vee_home_layout [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        width: 100% !important;
+        min-width: 0 !important;
+        flex: 1 1 100% !important;
+    }
+    .st-key-vee_home_layout .st-key-vee_image img {
+        max-width: 220px;
+    }
+}
 /* Align buttons and bottom stats on the three tool cards. */
 :is(.st-key-explore_card_customer, .st-key-explore_card_marketing, .st-key-explore_card_bookings)
   [data-testid="stVerticalBlock"] {
@@ -646,29 +531,28 @@ def home_page():
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
     st.markdown('<div id="chat-with-vee"></div>', unsafe_allow_html=True)
-    vee_col, greet_col = st.columns([1, 2])
-    with vee_col:
-        # Container key lets style.css add Vee's border
-        with st.container(key="vee_image"):
-            if VEE_FILE.exists():
-                try:
-                    st.image(str(VEE_FILE), width="stretch")
-                except Exception:
-                    st.image(str(VEE_FILE), use_container_width=True)
-            else:
-                st.markdown("#### Vee, your guide")
-    with greet_col:
-        # Yellow ombre box around the Chat with Vee area
-        with st.container(key="vee_chat_box"):
-            render_vee_chat(
+    with st.container(key="vee_home_layout"):
+        vee_col, greet_col = st.columns([0.9, 2.1], vertical_alignment="top")
+        with vee_col:
+            # Container key lets style.css add Vee's border
+            with st.container(key="vee_image"):
+                if VEE_FILE.exists():
+                    try:
+                        st.image(str(VEE_FILE), width="stretch")
+                    except Exception:
+                        st.image(str(VEE_FILE), use_container_width=True)
+                else:
+                    st.markdown("#### Vee, your guide")
+        with greet_col:
+            # Yellow ombre box around the Chat with Vee area
+            with st.container(key="vee_chat_box"):
+                render_vee_chat(
                 tools=tools,
                 business_types=BUSINESS_TYPES,
                 budget_cap=BUDGET_CAP,
                 comfort_options=COMFORT_OPTIONS,
-                business_tools=business_tools,
                 score_tools=score_tools,
                 evaluate_plan_cost=evaluate_plan_cost,
-                show_tool_result=show_tool_result,
                 ai_job_from_text=ai_job_from_text,
                 job_from_text=job_from_text,
                 vee_avatar=vee_avatar,

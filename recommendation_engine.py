@@ -4,7 +4,6 @@ from __future__ import annotations
 import csv
 import math
 import re
-from pathlib import Path
 
 FIT_STRONG = "Strong Fit"
 FIT_PARTIAL = "Partial Fit"

@@ -10,7 +10,6 @@ import logging
 import re
 
 import requests
-import pandas as pd
 import streamlit as st
 
 logger = logging.getLogger("vipervision.ai")
@@ -220,9 +219,9 @@ def _early_comfort(message, options):
     text = str(message).casefold()
     if re.search(r"\b(?:not comfortable|uncomfortable|struggle)\s+(?:with\s+)?(?:learning|using|new)\s*(?:software|tech|technology|tools)?\b", text):
         return _comfort("beginner", options)
-    if re.search(r"\b(?:comfortable|confident|happy|willing|open to)\s+(?:with\s+)?(?:learning|using|trying)\s+(?:new\s+)?(?:software|technology|tools|tech)\b", text):
+    if re.search(r"\b(?:comfortable|confident|happy|willing|open to)\s+(?:with\s+)?(?:learning|using|trying)\s+(?:new\s+)?(?:software|technology|tools|tech)\b|\bcomfortable with (?:software|tech|technology)\b", text):
         return _comfort("comfortable learning software", options)
-    if re.search(r"\b(?:tech beginner|beginner technical experience|beginner tech experience|very limited tech experience|not tech savvy|little technical experience|prefer simple software)\b", text):
+    if re.search(r"\b(?:tech beginner|beginner technical experience|beginner tech experience|very limited tech experience|not (?:very )?tech savvy|little technical experience|prefer simple software|i(?:'m| am) (?:a |an )?beginner|new to (?:tech|technology|software)|not (?:great|good) with (?:tech|technology|software))\b", text):
         return _comfort("beginner", options)
     return None
 
@@ -297,7 +296,7 @@ def _capture_profile_context(state, message, business_types, comfort_options,
         st.session_state.pop("vee_inline_followup", None)
     elif "budget_amount" not in answers and not ambiguous:
         # Only interpret a budget early when the owner explicitly names a limit.
-        if re.search(r"\b(?:my|our)\s+(?:monthly\s+)?(?:budget|max(?:imum)?(?:\s+budget)?|limit|ceiling)\s+(?:is|of|at)\b", message, re.I):
+        if re.search(r"\b(?:my|our)\s+(?:monthly\s+)?(?:budget|max(?:imum)?(?:\s+budget)?|limit|ceiling)\s+(?:is|of|at)\b|\b(?:i|we)\s+(?:can|could|would|have to)\s+(?:spend|afford)\s+\$?\d|\b(?:i|we)\s+have\s+\$?\d+(?:\.\d+)?\s*(?:/\s*(?:mo|month)|per month|a month|monthly)\s+to spend\b", message, re.I):
             early = _monthly_budget(message)
             if early is not None:
                 answers["budget_amount"] = early
@@ -500,23 +499,6 @@ def _is_greeting(message):
     """Don't record an opening hello as the visitor's name."""
     return bool(re.fullmatch(r"(?:hi|hello|hey|hiya|good morning|good afternoon|good evening)[!. ]*", message.strip(), re.I))
 
-
-
-def _clean_name(message):
-    """Extract a preferred name from a short introduction without an AI call.
-
-    Preserve nicknames such as "Best friend" when no introduction pattern exists.
-    """
-    text = message.strip()
-    # Strip casual greetings only when they precede an explicit introduction.
-    text = re.sub(r"^(?:(?:oh[\s,!.]+)?(?:hi|hello|hey|hiya)[\s,!.]+)+", "", text, flags=re.I)
-    # A name might be introduced directly or as part of a conversational sentence.
-    match = re.match(r"^(?:my name is|you can call me|call me|i[’']?m|i am)\s+(.+)$", text, re.I)
-    if match:
-        text = match.group(1).strip()
-    # Avoid swallowing the rest of a sentence as part of a name.
-    text = re.split(r"[,!.?;]|\s+(?:and|but)\s+", text, maxsplit=1)[0].strip()
-    return text[:60].strip()
 
 
 def _state():
@@ -722,17 +704,6 @@ def _followup(state, user_message, ranked, tools=None):
     return "I can help compare the recommended options or explain another named catalog tool."
 
 
-# Explicit, limited allowlist for cross-industry discovery. These products may
-# help with widely shared tasks, but no tattoo-parlor-specific verification is claimed.
-GENERAL_PURPOSE_TOOL_NAMES = frozenset({
-    "Canva Magic Studio", "Buffer AI Assistant", "Jasper", "Copy.ai", "ChatGPT", "Reclaim AI",
-})
-
-
-def _general_purpose_candidates(tools):
-    return tools[tools["tool_name"].isin(GENERAL_PURPOSE_TOOL_NAMES)].copy()
-
-
 def _matching_jobs(challenge, classified_job, goal=""):
     """Ground catalog categories in the owner's challenge AND clarified goal.
 
@@ -786,17 +757,6 @@ def _hard_requirements(text):
         if not negated:
             issues.append("health-data privacy or signed BAA")
     return issues
-
-
-def _workflow_gap(tool, job, request):
-    """Return specific unverified functional requirements, not a numeric downgrade."""
-    text = str(request).casefold()
-    description = f"{tool.get('pros', '')} {tool.get('ai_feature', '')}".casefold()
-    if job == "Scheduling" and re.search(r"\b(staff|employees?|workers?|crew|shifts?|labor)\b", text):
-        if re.search(r"\b(schedul\w*|shifts?|roster|labor|coverage|swap\w*)\b", text):
-            if not re.search(r"employee schedul|staff schedul|shift schedul|shift swap|labor track|labor forecast|crew schedul|employee shifts?|workforce", description):
-                return "staff scheduling, shift management, or labor planning"
-    return None
 
 
 def _catalog_comparison(ranked):
@@ -1076,8 +1036,7 @@ def _compare_followup_actions(state, ranked):
 
 def render_vee_chat(
     *, tools, business_types, budget_cap, comfort_options,
-    business_tools, score_tools, show_tool_result,
-    ai_job_from_text, job_from_text, vee_avatar, evaluate_plan_cost=None,
+    score_tools, ai_job_from_text, job_from_text, vee_avatar, evaluate_plan_cost=None,
     research_tools=None,
 ):
     """Main guided AI chat, compatible with ViperVision's scoring callbacks."""
@@ -1297,17 +1256,22 @@ def render_vee_chat(
                     a["goal"] = a["challenge"]
     elif stage == "business":
         if "business" not in a:
-            a["business"] = reply
-            a["catalog_business"] = _business_type(reply, business_types)
+            if budget_edit and budget_amount is not None:
+                error = "Let's finish the business details first."
+            else:
+                a["business"] = reply
+                a["catalog_business"] = _business_type(reply, business_types)
     elif stage == "goal":
-        a["goal"] = reply
-        # The owner may clarify a vague challenge here: use that evidence
-        # instead of locking in the model's first broad category.
-        corrected = _matching_jobs(a.get("challenge", ""), a.get("job"), reply)
-        if corrected:
-            a["job"] = corrected[0]
-            if corrected[0] != (a.get("initial_ai_job") or a.get("initial_job")):
-                state["classification_source"] = "Catalog intent rules"
+        if budget_edit and budget_amount is not None:
+            error = "Let's finish clarifying the problem first."
+        else:
+            a["goal"] = reply
+            # Use the owner's clarification, not only the first broad category.
+            corrected = _matching_jobs(a.get("challenge", ""), a.get("job"), reply)
+            if corrected:
+                a["job"] = corrected[0]
+                if corrected[0] != (a.get("initial_ai_job") or a.get("initial_job")):
+                    state["classification_source"] = "Catalog intent rules"
     elif stage == "budget":
         amount = _monthly_budget(reply)
         if _budget_is_ambiguous(reply):
