@@ -261,11 +261,11 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
     _ensure_profile(a)
     before = {k: v for k, v in a.items() if k not in {"revision", "evidence"}}
     stage = state["stage"]
-    text = message.strip()
+    text = message.strip().replace("’", "'")
     budget_edit = False
     ambiguous = False
     # Scope intent to clauses so a simultaneous needs edit cannot swallow a budget edit.
-    clauses = re.split(r"[;!]|(?<!\d)\.(?!\d)|,?\s+and\s+(?=(?:i|we|change|set|my|our)\b)", text, flags=re.I)
+    clauses = re.split(r"[;!]|(?<!\d)\.(?!\d)|,?\s+and\s+(?=(?:i|we|change|set|my|our|cancel|remove|drop|forget|replace|add)\b)", text, flags=re.I)
     for clause in clauses:
         explicit = _budget_update_intent(clause.strip())
         early = re.search(r"\b(?:my|our)\s+(?:maximum |monthly )?budget\s+is\b|\b(?:i|we)\s+(?:can|could|would)\s+(?:spend|afford)\b|\bi have\s+\$.*to spend\b", clause, re.I)
@@ -296,19 +296,24 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
         a["name"] = name
     a.update(_purchasing_details(text))
 
-    intent = re.search(r"\b(?:i|we)\s+(?:(?:also|actually|now|really)\s+)?(?:need|want|require)\b|\b(?:add|remove|drop|forget|replace|instead|i meant|prefer|optional|no longer|don't need|do not need)\b", text, re.I)
+    intent = re.search(r"\b(?:i|we)\s+(?:(?:also|actually|now|really|only)\s+)*(?:need|want|require)\b|\b(?:add|remove|drop|forget|replace|instead|i meant|cancel|not|prefer|optional|no longer|don't need|do not need)\b", text, re.I)
     problem_turn = stage in {"challenge", "goal"} and not _is_greeting(text) and (not budget_edit or bool(required_capabilities(None, text)))
     problem_turn = problem_turn or bool(_explicit_challenge(text)) or bool(_explicit_goal(text))
-    if (problem_turn or intent) and not ("?" in text and not intent):
+    if (problem_turn or intent) and "?" not in text:
         required = set(a["essential_capabilities"])
         optional = set(a["optional_capabilities"])
         unresolved = list(a["unresolved_requirements"])
-        replacing = bool(re.search(r"\b(?:forget|replace)\b.*\b(?:problem|everything|scheduling)\b|\b(?:instead(?: i)? need|my (?:actual|real) problem)\b", text, re.I))
+        exclusive = bool(re.search(r"\b(?:i|we)\s+(?:now\s+)?only\s+(?:need|want|require)\b|\b(?:i|we)\s+(?:need|want|require)\s+only\b", text, re.I))
+        replacing = exclusive or bool(re.search(r"\bforget scheduling[.;]|\b(?:forget|replace)\s+(?:the |my |our )?(?:problem|everything)\b|\b(?:instead(?: i)? need|my (?:actual|real) problem)\b", text, re.I))
         if replacing:
             required.clear()
             optional.clear()
             unresolved.clear()
-        edit_text = re.sub(r"\breplace (.+?) with (.+)", r"remove \1; I need \2", text, flags=re.I)
+        edit_text = re.sub(r"\breplace ([^.;!?]+?) with ([^.;!?]+)", r"remove \1; I need \2", text, flags=re.I)
+        edit_text = re.sub(r"\binstead of ([^,.;!?]+),\s*((?:i|we)\s+(?:need|want|require)\b[^.;!?]+)", r"remove \1; \2", edit_text, flags=re.I)
+        edit_text = re.sub(r"([^.;!?]+?)\s+instead of\s+([^.;!?]+)", r"remove \2; \1", edit_text, flags=re.I)
+        edit_text = re.sub(r"\bnot (?:only|just)\b", "", edit_text, flags=re.I)
+        edit_text = re.sub(r"\bbut also\b", "and", edit_text, flags=re.I)
         if re.search(r"\bi meant\b", text, re.I):
             new_caps = set(required_capabilities(None, text))
             schedule_family = {"crew_dispatch", "employee_scheduling", "shift_swap_management", "appointment_booking", "personal_task_scheduling"}
@@ -316,16 +321,34 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
                 required.difference_update(schedule_family - new_caps)
                 optional.difference_update(schedule_family - new_caps)
         # Preserve distinct needs; negation applies only to its own clause.
-        pieces = re.split(r"[;!?]|,(?!\d)|(?<!\d)\.(?!\d)|\b(?:but|and|plus|as well as)\b", edit_text, flags=re.I)
+        pieces = re.split(r"([;!?]|,(?!\d)|(?<!\d)\.(?!\d)|\b(?:but|and|plus|as well as)\b)", edit_text, flags=re.I)
         changed_needs = False
         context_caps = required_capabilities(None, text)
+        removing = False
+        concrete_refinement = False
         for piece in pieces:
             piece = piece.strip(" ,")
+            if piece.casefold() in {"but", ";", ".", "!", "?"}:
+                removing = False
+                continue
+            if not piece or piece.casefold() in {"and", "plus", "as well as"}:
+                continue
             if not piece or re.search(r"\b(?:budget|per seat|tech|software|employees? total|beginner|comfortable|spend|per month|monthly)\b", piece, re.I) and not required_capabilities(None, piece):
                 continue
-            negative = bool(re.search(r"\b(?:remove|drop|forget|no longer need|don't need|do not need)\b|\b(?:will not solve|not required|is not needed)\b", piece, re.I))
-            parse_text = re.sub(r"\b(?:remove|drop|forget|no longer need|don't need|do not need)\b", "", piece, flags=re.I)
-            parse_text = re.sub(r"\s+(?:alone\s+)?(?:will not solve|is not needed|not required).*", "", parse_text, flags=re.I)
+            if re.search(r"\b(?:do not|don't|never)\s+(?:cancel|remove|drop|forget|replace|add)\b", piece, re.I):
+                removing = False
+                continue
+            removal = r"\b(?:cancel (?:the )?need for|remove|drop|forget|no longer (?:need|want|require)|don't (?:need|want|require)|do not (?:need|want|require)|not)\b"
+            suffix = r"\s+(?:alone\s+)?(?:will not solve|is not needed|isn't needed|not required|is not required|isn't required).*"
+            explicit_remove = bool(re.search(removal, piece, re.I) or re.search(suffix, piece, re.I))
+            explicit_add = bool(re.search(r"\b(?:i|we)\s+(?:(?:also|only|now)\s+)?(?:need|want|require)\b|\b(?:add|keep)\b", piece, re.I))
+            if explicit_remove:
+                removing = True
+            elif explicit_add:
+                removing = False
+            negative = removing
+            parse_text = re.sub(suffix, "", piece, flags=re.I)
+            parse_text = re.sub(removal, "", parse_text, flags=re.I)
             if negative:
                 removed = re.sub(r"^\s*(?:i|we)\s+", "", parse_text, flags=re.I).strip().casefold()
                 hard_removed = _hard_requirements(parse_text)
@@ -350,16 +373,21 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
                     required.difference_update(caps + prefs)
                     optional.difference_update(caps + prefs)
                 else:
+                    concrete_refinement = concrete_refinement or bool(set(caps) - {"general_business_assistance"})
                     required.update(caps)
                     optional.update(prefs)
                     required.difference_update(prefs)
                 # A concrete clarification resolves the preceding vague intake answer.
-                if stage == "goal" or unresolved == [a.get("challenge")]:
+                if unresolved == [a.get("challenge")]:
                     unresolved.clear()
             elif (re.search(r"\b(?:need|require|problem|struggling|trouble|help with)\b", piece, re.I)
                   or (intent and not re.search(r"\b(?:budget|employees?|people|beginner|comfortable|business|run|own|spend|free|name|actually)\b", piece, re.I))) and not negative:
                 if piece not in unresolved:
                     unresolved.append(piece)
+        if (stage == "goal" and concrete_refinement
+                and re.search(r"\bdaily operations\b", a.get("challenge", ""), re.I)
+                and not re.search(r"\b(?:also|in addition|as well as|general business (?:help|assistance))\b", text, re.I)):
+            required.discard("general_business_assistance")
         if problem_turn or changed_needs or replacing or unresolved != a["unresolved_requirements"]:
             initial = "challenge" not in a
             if initial:
@@ -1136,12 +1164,11 @@ def render_vee_chat(
                     st.info("No verified catalog tools match this specific workflow within your "
                             "budget. This doesn't mean no solution exists; our researched catalog has limits.")
                 st.write("**Ways to proceed:**")
-                st.write("- Separate the most urgent workflow from secondary needs (for example, "
-                         "crew dispatch versus answering customer calls).")
+                st.write("- Review the saved requirements above. Tell me if any should be removed, clarified, or made optional.")
                 st.write("- Review the catalog for tools addressing the secondary task; "
                          "don't treat those tools as replacements for the main requirement.")
                 st.write("- Check the provider directly for required features, total cost, and compliance before buying.")
-                st.write("- Consider free scheduling templates or existing calendar tools for a temporary workaround; these are not verified AI recommendations.")
+                st.write("- Consider an existing tool or a manual process for a temporary workaround; these are not verified AI recommendations.")
                 st.caption("You can change your budget above or clarify your needs in the chat.")
             else:
                 for index, item in enumerate(ranked[:3], start=1):
