@@ -6,6 +6,11 @@ import pandas as pd
 import streamlit as st
 import requests
 from vee_chat import render_vee_chat, _call_ai
+from recommendation_engine import (
+    WEIGHTS, evaluate_tool as engine_evaluate_tool, load_plan_catalog,
+    required_capabilities, research_leads as engine_research_leads,
+    score_tools as engine_score_tools, split_requirements,
+)
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
     page_icon="🔍",
@@ -14,6 +19,7 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "ai_tools.csv"
+PLAN_FILE = BASE_DIR / "tool_plans.csv"
 VEE_FILE = BASE_DIR / "vee.png"
 EXPECTED_TOOL_COUNT = 22
 PRICE_CHECK_DATE = "Nov 6, 2026"  # replaced by the newest checked_date in the catalog
@@ -146,6 +152,15 @@ newest_check = pd.to_datetime(tools["checked_date"], errors="coerce").max()
 if pd.notna(newest_check):
     PRICE_CHECK_DATE = date_label(newest_check)
 
+try:
+    tool_plans = load_plan_catalog(PLAN_FILE)
+    if {row["tool_name"] for row in tool_plans} != set(tools["tool_name"]):
+        raise ValueError("Every catalog tool must have plan-level data.")
+except (FileNotFoundError, ValueError) as error:
+    st.error("The plan catalog could not be loaded. Check tool_plans.csv and try again.")
+    st.caption(str(error))
+    st.stop()
+
 if len(tools) < EXPECTED_TOOL_COUNT:
     st.warning(
         f"The catalog currently contains {len(tools)} tools; "
@@ -177,233 +192,68 @@ def starting_cost(tool):
     return float(tool["monthly_cost"])
 
 def evaluate_plan_cost(tool, requirements=None):
-    """Conservative, catalog-specific monthly cost assessment for recommendations and ROI.
-
-    'confirmed' means the documented tier covers the KNOWN requirements, not a
-    live provider quote. 'unknown' NEVER means free; 'ineligible' means the
-    documented minimum is already over budget. Only the catalog is consulted.
-    """
-    req = requirements or {}
-    name = str(tool.get("tool_name", ""))
-    note = str(tool.get("price_note", ""))
-    cap = req.get("budget", float("inf"))
-    seats = req.get("seats")
-    locations = req.get("locations") or 1
-    usage = req.get("monthly_usage")
-    usage_unit = str(req.get("usage_unit") or "")
-    monthly_only = bool(req.get("monthly_billing_only"))
-    free = pd.notna(tool.get("free_price")) and float(tool["free_price"]) == 0
-    base = None if pd.isna(tool.get("monthly_cost")) else float(tool["monthly_cost"])
-
-    cost = None
-    plan = "Catalog starting option"
-    reasons = []
-    # These are explicitly documented plan conditions from the supplied CSV.
-    if name == "Intercom Fin AI Agent":
-        plan = "Fin usage-based outcomes (base subscription additional/uncertain)"
-        if usage is not None and usage_unit in ("outcomes", "resolved_questions", "inquiries"):
-            minimum = 0.99 * usage
-            reasons.append(f"{usage:g} resolved outcomes at $0.99 each cost at least ${minimum:,.2f}, before seats/base plans")
-            if minimum > cap:
-                return {"status": "ineligible", "cost": None, "lower_bound": minimum,
-                        "plan": plan, "reason": "; ".join(reasons)}
-        reasons.append("Final total depends on resolved outcomes and required base/seat charges")
-    elif name == "Tidio Lyro AI":
-        plan = "Lyro 50-conversation starting tier"
-        if usage is not None and usage_unit in ("conversations", "inquiries", "resolved_questions", "outcomes") and usage > 50:
-            reasons.append(f"{usage:g} conversations exceed the 50-conversation starting tier")
-        else:
-            reasons.append("AI conversation limits and eligible plan must be verified before pricing the workload")
-    elif name == "Goodcall":
-        plan = "Starter with 100 unique customers"
-        if usage is not None and usage_unit in ("callers", "customers", "unique_customers"):
-            cost = 79 + max(0, usage - 100) * 0.79
-            reasons.append(f"{usage:g} unique customers; 100 included, $0.79 each additional")
-        else:
-            reasons.append("Number of unique customers needed to determine overages")
-    elif name == "Reclaim AI":
-        if seats is None:
-            reasons.append("Number of software seats unknown; free Lite is one user only")
-        elif seats == 1:
-            cost = 0.0
-            plan = "Lite free, one user"
-        elif 2 <= seats <= 10:
-            cost = 12.0 * seats if monthly_only else None
-            plan = "Starter, up to 10 users"
-            if not monthly_only:
-                reasons.append("Starter price depends on monthly versus annual billing ($12 monthly; $10 annual per seat)")
-        else:
-            reasons.append("Starter is limited to 10 users; an eligible higher tier is not priced here")
-    elif name == "7shifts":
-        plan = "Premium advanced forecasting"
-        cost = 149.99 * locations
-        reasons.append(f"${149.99:,.2f} per location across {locations} location(s)")
-    elif name == "Cactus AI":
-        plan = "Growth (AI forecasting features)"
-        cost = 149.0 * locations
-        reasons.append(f"$149 per location across {locations} location(s)")
-    elif name == "SiteRecon Scout AI":
-        plan = "Scout paid credits"
-        if usage is not None and usage_unit in ("property_acre_credits", "credits"):
-            if usage <= 20:
-                cost = 39.0
-                plan = "Scout 20 property-acre credits"
-            elif usage <= 50:
-                cost = 79.0
-                plan = "Scout 50 property-acre credits"
-            else:
-                reasons.append("More than 50 credits; higher-volume cost not in catalog")
-        else:
-            reasons.append("Property-acre credit need unknown; free two-measurement offer does not establish paid-credit eligibility")
-    elif name == "Buffer AI Assistant":
-        plan = "Free: three channels; 10 queued posts per channel"
-        channels = req.get("channels")
-        if channels is not None and channels <= 3:
-            cost = 0.0
-        else:
-            # The catalog lists $5/channel as annual equivalent, not monthly-billed.
-            reasons.append("Free plan covers up to three channels; confirm channels and queue requirements")
-        if monthly_only and cost is None:
-            reasons.append("$5/channel figure is annually billed; monthly-billed price is not in catalog")
-    elif name == "Copy.ai":
-        plan = "Chat, 5 included seats"
-        if seats is None:
-            reasons.append("Number of required software seats not established (five included)")
-        elif seats > 5:
-            reasons.append("Requested software seats exceed five included Chat seats")
-        else:
-            cost = 29.0
-    elif name == "Calendly Callie":
-        plan = "Callie AI bundle plus eligible per-seat plan"
-        reasons.append("$18/seat and $8 AI add-on are annual prices; monthly AI bundle cost unverified")
-    elif name == "Jobber AI Receptionist":
-        plan = "AI Receptionist add-on"
-        reasons.append("$29 add-on requires a qualifying Jobber subscription; total unknown")
-    elif name == "Canva AI":
-        plan = "Limited free AI use"
-        reasons.append("Free AI allowance and monthly-billed price not confirmed for stated output needs")
-    elif name == "Canva Magic Studio":
-        plan = "Free with limited AI operations"
-        # Do not claim free covers a business's requested output volume.
-        reasons.append("Free AI usage allowance may not cover the required content volume")
-    elif name == "Predis.ai":
-        plan = "Core monthly, limited generation credits"
-        reasons.append("Generation credit needs not established; Core does not include auto-posting")
-    elif name == "Dext AI Assist":
-        plan = "Base subscription plus AI Assist"
-        cost = 42.0
-    elif name == "Jasper":
-        plan = "Pro per software seat"
-        if seats is not None:
-            cost = 69.0 * seats
-        else:
-            reasons.append("Per-seat subscription; required seat count unknown")
-    elif name == "CafeSquad AI":
-        plan = "Growth, 30 AI review drafts"
-        if usage is not None and usage_unit in ("drafts", "reviews") and usage > 30:
-            reasons.append("Requested draft volume exceeds 30 included Growth drafts")
-        else:
-            cost = 299.0
-    elif name == "Podium AI":
-        plan = "Core annual commitment plus 10DLC fee"
-        if not monthly_only:
-            reasons.append("Published $399 base plus $5 10DLC; annual commitment required")
-        else:
-            reasons.append("12-month commitment conflicts with monthly-only preference")
-    elif name == "Neighborbrite":
-        plan = "Landscaper estimate workflow"
-        cost = 149.0 if "estimat" in str(req.get("task_text", "")).lower() else 49.0
-    elif name == "ChatGPT":
-        plan = "Free or Plus general assistant"
-        cost = 0.0
-    elif name == "Birdeye Reviews AI" or name == "PreciTaste":
-        reasons.append("Quote-only deployment; no verified monthly total")
-    elif free:
-        reasons.append("Free tier available but eligibility for the requested capabilities is not established")
-    elif base is not None:
-        # Only fixed, unqualified monthly catalog prices are confidently usable.
-        if not re.search(r"per.seat|/seat|per.location|/location|usage|additional|add.on|annual|billed|credit|conversation|outcome|customer|quote", note, re.I):
-            cost = base
-        else:
-            reasons.append("Starting figure has plan, billing, seat, or usage conditions")
-    else:
-        reasons.append("No verified monthly price in the catalog")
-
-    if cost is None:
-        return {"status": "unknown", "cost": None, "lower_bound": None,
-                "plan": plan, "reason": "; ".join(reasons) or "Applicable total monthly cost unverified"}
-    if cost > cap:
-        return {"status": "ineligible", "cost": cost, "lower_bound": cost,
-                "plan": plan, "reason": "; ".join(reasons) or "Required plan exceeds budget"}
-    return {"status": "confirmed", "cost": cost, "lower_bound": cost,
-            "plan": plan, "reason": "; ".join(reasons) or "Catalog-priced plan fits the known requirements"}
+    """Evaluate the lowest evidence-backed plan that covers required capabilities."""
+    req = dict(requirements or {})
+    challenge = req.get("job") or str(tool.get("challenge", ""))
+    goal = req.get("goal", "")
+    required, preferred = split_requirements(challenge, req.get("challenge_text", req.get("challenge", "")),
+                                             goal, req.get("preferred_capabilities"))
+    return engine_evaluate_tool(tool, tool_plans, req, required, preferred)
 
 
 def score_tools(data, job, cap, comfort, requirements=None):
-    """Explainable job 3 / price 2 / effort 1, with contextual cost checks."""
-    scored = []
-    for _, row in data.iterrows():
-        if row["challenge"] != job:
-            continue
-        pricing = None
-        if requirements is not None:
-            pricing = evaluate_plan_cost(row, {**requirements, "budget": cap})
-            if pricing["status"] == "ineligible":
-                continue
-            if cap == 0 and pricing["status"] != "confirmed":
-                continue
-        elif not price_fits(row, cap):
-            continue
+    """Return verified affordable Strong Fit and Partial Fit candidates."""
+    req = dict(requirements or {})
+    req.setdefault("challenge", "")
+    req.setdefault("goal", "")
+    req.setdefault("employees", None)
+    return engine_score_tools(data, job, cap, comfort, req, tool_plans)
 
-        score = 3
-        breakdown = {"Job fit": 3, "Price fit": 0, "Effort fit": 0}
-        reasons = [f"Matches catalog job: {job}"]
-        if pricing is not None:
-            if pricing["status"] == "confirmed":
-                score += 2
-                breakdown["Price fit"] = 2
-                reasons.append(f"Applicable catalog plan: {pricing['plan']} (${pricing['cost']:,.2f}/month)")
-            else:
-                reasons.append("Total price/plan eligibility not verified; budget fit remains unknown")
-        elif price_fits(row, cap):
-            score += 2
-            breakdown["Price fit"] = 2
-            reasons.append("Published starting option fits the selected budget; plan terms may apply")
-        if row["effort"] == "Easy":
-            score += 1
-            breakdown["Effort fit"] = 1
-            reasons.append("Setup is marked easy in the catalog")
-        elif row["effort"] == "Medium" and comfort == "I can learn a bit":
-            score += 1
-            breakdown["Effort fit"] = 1
-            reasons.append("Medium setup matches your comfort level")
-        elif row["effort"] == "Medium":
-            reasons.append("Setup is medium and may need extra learning")
-        scored.append({"score": score, "tool": row, "reasons": reasons,
-                       "breakdown": breakdown, "pricing": pricing})
-    scored.sort(key=lambda item: (-item["score"], str(item["tool"]["tool_name"]).casefold()))
-    return scored
+
+def find_research_leads(data, job, cap, comfort, requirements=None):
+    req = dict(requirements or {})
+    req.setdefault("challenge", "")
+    req.setdefault("goal", "")
+    req.setdefault("employees", None)
+    return engine_research_leads(data, job, cap, comfort, req, tool_plans)
+
+
+def plan_summary(tool_name):
+    summaries = []
+    for row in tool_plans:
+        if row["tool_name"] != tool_name:
+            continue
+        amount = row.get("monthly_price", "")
+        channel = row.get("per_channel_cost", "")
+        if amount:
+            suffix = f"${float(amount):,.2f}/mo"
+        elif channel:
+            suffix = f"${float(channel):,.2f}/channel/month equivalent"
+        else:
+            suffix = "total unknown"
+        if "annual" in str(row.get("billing_term", "")).casefold():
+            suffix += " (annual billing)"
+        summaries.append(f"{row['plan_name']}: {suffix}")
+    return "; ".join(summaries)
+
 
 @st.cache_data
 def run_scorer_checks(data):
-    """Run the scorer on every business type, job, budget, and comfort pair."""
+    """Check fit classes, affordability gates, ordering, and explanations."""
     total = 0
     passed = 0
     for business_type in BUSINESS_TYPES:
-        pool = business_tools(data, business_type)
+        pool = data
         for job in JOBS:
             for cap in BUDGET_CAP.values():
                 for comfort in COMFORT_OPTIONS:
                     ranked = score_tools(pool, job, cap, comfort)
-                    scores = [item["score"] for item in ranked]
+                    classes = [item["fit_classification"] for item in ranked]
                     ok = (
-                        all(3 <= score <= 6 for score in scores)
-                        and scores == sorted(scores, reverse=True)
-                        and all(item["tool"]["challenge"] == job for item in ranked)
-                        and all(
-                            sum(item["breakdown"].values()) == item["score"]
-                            for item in ranked
-                        )
+                        all(label in {"Strong Fit", "Partial Fit"} for label in classes)
+                        and classes == sorted(classes, key=lambda label: 0 if label == "Strong Fit" else 1)
+                        and all(item["pricing"]["status"] == "confirmed" for item in ranked)
+                        and all(item["reasons"] for item in ranked)
                     )
                     total += 1
                     passed += int(ok)
@@ -411,7 +261,7 @@ def run_scorer_checks(data):
 
 def team_size_note(tool, employees):
     """Compare team size with a free plan limit stated in the catalog price note.
-    This note is information only. It does not change the score.
+    This note is informational and does not change the fit class.
     """
     match = re.search(r"Free up to (\d+) (team members|employees)", str(tool["price_note"]))
     if not match:
@@ -435,16 +285,10 @@ def show_tool_link(url, name=None):
 def show_tool_result(item, number, employees=None):
     tool = item["tool"]
     st.markdown(f"#### {number}. {tool['tool_name']}")
-    st.write(f"**Fit score:** {item['score']} out of 6")
-    st.write(
-        "Score breakdown: "
-        f"job fit {item['breakdown']['Job fit']} out of 3, "
-        f"price fit {item['breakdown']['Price fit']} out of 2, "
-        f"effort fit {item['breakdown']['Effort fit']} out of 1."
-    )
+    st.write(f"**Fit classification:** {item['fit_classification']}")
     st.write(f"**Price:** {md(tool['price_note'])}")
     st.write(f"**Setup:** {tool['effort']}")
-    st.write("**Why it matched:** " + md("; ".join(item["reasons"])))
+    st.write("**Why:** " + md("; ".join(item["reasons"])))
     if employees:
         note = team_size_note(tool, employees)
         if note:
@@ -489,7 +333,7 @@ def build_starter_stack(pool, cap, comfort, first_job):
     stack = []
     for job in order:
         ranked = score_tools(pool, job, cap, comfort)
-        if ranked and ranked[0]["breakdown"]["Price fit"] == 2:
+        if ranked and ranked[0]["fit_classification"] in {"Strong Fit", "Partial Fit"}:
             stack.append({"job": job, "item": ranked[0]})
         if len(stack) == 3:
             break
@@ -504,48 +348,41 @@ def show_starter_stack(pool, budget_label, comfort, first_job):
         return
     st.write(
         "One top tool for each of up to three different jobs, starting with your "
-        "job and scored with the same rules as your quiz answers. Only tools that "
+        "job and classified with the same rules as your quiz answers. Only affordable tools that "
         "fit your budget are included."
     )
     start_total = 0.0
-    paid_total = 0.0
     rows = []
     for entry in stack:
         tool = entry["item"]["tool"]
+        pricing = entry["item"]["pricing"]
         st.write(
             f"**{tool['tool_name']}** for {entry['job']}: "
-            f"{md(tool['price_note'])}. Score "
-            f"{entry['item']['score']} out of 6."
+            f"{pricing['plan']} at ${pricing['cost']:,.2f}/month — "
+            f"{entry['item']['fit_classification']}."
         )
         show_tool_link(tool["website"], tool["tool_name"])
-        start_cost = starting_cost(tool)
+        start_cost = pricing["cost"]
         start_total += start_cost or 0.0
-        if pd.notna(tool["monthly_cost"]):
-            paid_total += float(tool["monthly_cost"])
         rows.append(
             {
                 "Tool": tool["tool_name"],
                 "Job": entry["job"],
+                "Selected plan": pricing["plan"],
                 "Price": tool["price_note"],
-                "Starting monthly cost": start_cost,
+                "Verified monthly plan cost": start_cost,
                 "Website": tool["website"],
             }
         )
     st.write(f"Estimated monthly total to start: ${start_total:,.0f}.")
-    if paid_total > start_total:
-        st.write(
-            "If you later move every tool in the stack to its published paid plan: "
-            + md(f"${paid_total:,.0f}")
-            + " a month."
-        )
     if cap != float("inf"):
         if start_total <= cap:
             st.success(f"The starting total is within your budget of {md(budget_label)}.")
         else:
             st.warning(f"The starting total is above your budget of {md(budget_label)}.")
     st.caption(
-        "Totals use published starting prices only. Card processing fees and per "
-        "use fees are not included."
+        "Totals use the selected eligible plan and verified required charges. "
+        "The plan notes show any remaining limits or terms."
     )
     stack_csv = pd.DataFrame(rows).to_csv(index=False)
     st.download_button(
@@ -563,7 +400,9 @@ def shortlist_csv(ranked):
             {
                 "Rank": number,
                 "Tool": tool["tool_name"],
-                "Fit score out of 6": item["score"],
+                "Fit classification": item["fit_classification"],
+                "Selected plan": item["plan"],
+                "Verified monthly cost": item["pricing"]["cost"],
                 "Price": tool["price_note"],
                 "Setup": tool["effort"],
                 "Why it matched": "; ".join(item["reasons"]),
@@ -613,7 +452,7 @@ def show_chat_answer(answer):
                 "I could not match your words to a catalog job, so I used the "
                 f"job you chose in the list: {job}."
             )
-        pool = business_tools(tools, answer["business"])
+        pool = tools
         ranked = score_tools(pool, job, BUDGET_CAP[answer["budget"]], answer["comfort"])
         if ranked:
             st.write("Here are the strongest catalog matches for your answers.")
@@ -732,6 +571,56 @@ def load_css(file_name):
 
 load_css("style.css")
 
+# Keep card buttons level, even when descriptions or tool lists differ.
+CARD_LAYOUT_FIX = """
+<style>
+/* Align buttons and bottom stats on the three tool cards. */
+:is(.st-key-explore_card_customer, .st-key-explore_card_marketing, .st-key-explore_card_bookings)
+  [data-testid="stVerticalBlock"] {
+    display: flex;
+    flex-direction: column;
+    min-height: 570px;
+}
+:is(.st-key-explore_card_customer, .st-key-explore_card_marketing, .st-key-explore_card_bookings)
+  [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
+    margin-top: auto;
+}
+/* Give free-resource cards the same aligned button row. */
+:is(.st-key-explore_card_sba, .st-key-explore_card_score, .st-key-explore_card_partners)
+  [data-testid="stVerticalBlock"] {
+    display: flex;
+    flex-direction: column;
+    min-height: 350px;
+}
+:is(.st-key-explore_card_sba, .st-key-explore_card_score, .st-key-explore_card_partners)
+  [data-testid="stElementContainer"]:has([data-testid="stLinkButton"]) {
+    margin-top: auto;
+}
+/* Make the entire button label readable and consistent. */
+:is(.st-key-explore_card_customer, .st-key-explore_card_marketing, .st-key-explore_card_bookings,
+    .st-key-explore_card_sba, .st-key-explore_card_score, .st-key-explore_card_partners)
+  :is([data-testid="stButton"], [data-testid="stLinkButton"]) :is(button, a) {
+    width: 100%;
+    min-height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 14px;
+    text-align: center;
+    line-height: 1.3;
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+/* Stacked cards do not need fixed desktop heights. */
+@media (max-width: 767px) {
+  [class*="st-key-explore_card_"] [data-testid="stVerticalBlock"] {
+    min-height: unset;
+  }
+}
+</style>
+"""
+st.markdown(CARD_LAYOUT_FIX, unsafe_allow_html=True)
+
 st.markdown("<div id='top'></div>", unsafe_allow_html=True)
 
 # The navigation controls are rendered below, after the pages are defined.
@@ -783,6 +672,7 @@ def home_page():
                 ai_job_from_text=ai_job_from_text,
                 job_from_text=job_from_text,
                 vee_avatar=vee_avatar,
+                research_tools=find_research_leads,
             )
 
         # Once the first chat with Vee is done, the ROI calculator shows right under it
@@ -969,7 +859,7 @@ def about_page():
         st.markdown(
             '<div class="explore-pill">About this site</div>'
             '<div class="explore-title">Questions about <span class="vee-gradient">VipervisionAI</span></div>'
-            '<p class="explore-subtitle">Quick answers about what the site does, how tools are scored, '
+            '<p class="explore-subtitle">Quick answers about what the site does, how tool fit is classified, '
             'and who built it.</p>',
             unsafe_allow_html=True,
         )
@@ -982,15 +872,17 @@ def about_page():
                 "adopt AI tools. Chat with Vee to discuss a problem and see catalog-grounded "
                 "candidates with reasons and limitations."
             )
-        with st.expander("How does the fit score work?"):
+        with st.expander("How are tool fits classified?"):
             st.write(
-                "Every score uses the same three rules. Job fit is worth 3 points, price fit "
-                "is worth 2 points, and effort fit is worth 1 point, for a total out of 6. "
-                "The score is a fit guide, not a customer review or a guarantee of results."
+                "Strong Fit means the plan has documented required capabilities, supports the "
+                "workflow, and has a verified total cost within budget. Partial Fit means an "
+                "affordable plan addresses a documented part of the problem, and we explain "
+                "what is missing. Research Lead means important cost or capability evidence "
+                "still needs checking. Known over-budget options are excluded."
             )
         with st.expander("Does an AI pick my tools?"):
             st.write(
-                "No. The recommendations come from clear scoring rules, so the same answers "
+                "No. The recommendations come from clear eligibility and fit rules, so the same answers "
                 "always give the same results, and you can see why each tool matched."
             )
         with st.expander("How current are the prices?"):
@@ -1028,29 +920,30 @@ def about_page():
                 "setup effort, price note, provider website, source, and price check date."
             )
             st.write(
-                "The fit score uses three visible rules. Job fit contributes 3 points "
-                "when the catalog job matches. Price fit contributes 2 points when a "
-                "published free starting option or monthly cost fits the selected budget. "
-                "Effort fit contributes 1 point when the setup level matches the selected "
-                "technology comfort."
+                "Strong Fit requires documented support for all stated essential capabilities "
+                "and a verified total plan cost within budget. Partial Fit requires a verified "
+                "affordable plan that documents meaningful support for only part of the task; "
+                "the missing capability is shown. Unknown costs or essential capabilities "
+                "are Research Leads, not verified matches. Known over-budget plans are excluded. "
+                "Industry labels do not affect classification; workflow capabilities do."
             )
             st.write(
-                "A quote only price is not treated as a confirmed budget fit. The score "
-                "is a platform fit estimate, not an independent performance rating, "
-                "customer review, or guarantee."
+                "The labels describe what the available catalog evidence supports; they are "
+                "not a promise of business results. A product can appear in the catalog "
+                "without qualifying as a recommendation for a particular owner."
             )
             st.write(
-                "**Beyond reviews:** the score uses facts we can check, which are the job "
-                "match, the published price, and the setup effort. It does not use customer "
-                "reviews or star ratings. In the sixteen week plan we would add more "
-                "checkable facts, such as which systems a tool works with."
+                "**Beyond labels:** business type helps Vee understand context and classify "
+                "the workflow, but industry labels do not award points. The catalog maps "
+                "capabilities to plans and evidence. It does not use customer reviews or "
+                "star ratings as proof of fit."
             )
             st.write(
-                "**What each question tests:** business type and job decide which catalog "
-                "tools can match. Budget tests whether a published price fits. Technology "
-                "comfort tests whether the setup effort fits. Team size is used for a "
-                "free plan limit check when the catalog states one, and it does not change "
-                "the score."
+                "**What each question tests:** business type informs workflow context; "
+                "capability evidence determines whether a plan solves the stated need. "
+                "Budget is a hard eligibility limit. Technology comfort informs implementation "
+                "guidance but does not change the fit classification. Team size is used when a plan "
+                "has a verified employee limit."
             )
             st.write(
                 "Sources and dates are shown with each catalog entry. Provider pricing "
@@ -1093,11 +986,11 @@ def about_page():
         # Architecture and future work
         with st.expander("How the prototype works and what comes next"):
             st.write(
-                "**Current prototype:** the CSV catalog supplies tool details and "
-                "published prices. The questionnaire filters by business type and job. "
-                "A deterministic Python function calculates the fit score and reasons. "
-                "The catalog, comparison view, ROI calculator, and chat helper use "
-                "the same catalog data."
+                "**Current prototype:** ai_tools.csv preserves product descriptions and sources; "
+                "tool_plans.csv records plan-specific capabilities and costs. The questionnaire "
+                "uses business context to identify workflow needs. Eligibility checks required "
+                "features and plan cost before assigning Strong Fit, Partial Fit, or Research Lead. "
+                "Known over-budget plans are excluded from recommendations."
             )
             st.graphviz_chart(
                 r"""
@@ -1105,21 +998,17 @@ def about_page():
           rankdir=LR;
           node [shape=box, style="rounded,filled", fillcolor="#e8eefc",
                 color="#0b1e4b", fontname="Helvetica"];
-          catalog [label="ai_tools.csv\nTool catalog"];
-          loader [label="load_tools\nChecks the data"];
-          scorer [label="score_tools\nJob 3, price 2, effort 1"];
-          quiz [label="Quiz results\nTop 3 with reasons"];
-          stack [label="Starter stack"];
-          chat [label="Chat helper"];
-          browse [label="Catalog and compare"];
-          roi [label="ROI calculator"];
-          catalog -> loader;
-          loader -> scorer;
-          loader -> browse;
-          loader -> roi;
-          scorer -> quiz;
-          scorer -> stack;
-          scorer -> chat;
+          catalog [label="ai_tools.csv\nProduct catalog"];
+          plans [label="tool_plans.csv\nPlan-level evidence"];
+          gate [label="Eligibility\nRequired features + total cost"];
+          scorer [label="Fit classification\nStrong · Partial · Research"];
+          results [label="Affordable fits\nSeparate research leads"];
+          roi [label="Plan-specific pricing\nComparison and ROI"];
+          catalog -> gate;
+          plans -> gate;
+          gate -> scorer;
+          scorer -> results;
+          plans -> roi;
         }
         """
             )
@@ -1203,10 +1092,9 @@ def about_page():
             ]
             show_table(pd.DataFrame(check_rows))
             st.caption(
-                "The scorer checks confirm that scores stay between 3 and 6, results are "
-                "sorted from best to worst, every result matches the chosen job, and the "
-                "breakdown adds up to the score. They run for all listed business types, all "
-                "jobs, all budgets, and both comfort levels."
+                "These checks confirm fit classifications, affordability and capability eligibility, "
+                "ranking order, and explanations across catalog jobs, budgets, and comfort levels. "
+                "Business labels do not determine fit."
             )
 
 
@@ -1273,6 +1161,7 @@ def catalog_page():
                     st.write(f"**Job:** {tool['challenge']}")
                     st.write(f"**Business:** {tool['business_type']}")
                     st.write(f"**Price:** {md(tool['price_note'])}")
+                    st.write(f"**Structured plan records:** {md(plan_summary(tool['tool_name']))}")
                     st.write(f"**Setup:** {tool['effort']}")
                     st.write(f"**What it does well:** {md(tool['pros'])}")
                     st.write(f"**What to check:** {md(tool['cons'])}")
@@ -1289,16 +1178,18 @@ def catalog_page():
     )
     if picked:
         compare = tools.set_index("tool_name").loc[picked].reset_index()
+        compare["plan_tiers"] = compare["tool_name"].apply(plan_summary)
         compare["free_start"] = compare.apply(
             lambda row: "Yes (AI tier may be paid)" if has_free_starting_plan(row) else "No", axis=1
         )
         compare = compare[
-            ["tool_name", "challenge", "price_note", "free_start", "effort", "pros", "cons"]
+            ["tool_name", "challenge", "price_note", "plan_tiers", "free_start", "effort", "pros", "cons"]
         ].rename(
             columns={
                 "tool_name": "Tool",
                 "challenge": "Job",
                 "price_note": "Price",
+                "plan_tiers": "Structured plans and known prices",
                 "free_start": "Free starting option",
                 "effort": "Setup",
                 "pros": "What it does well",
@@ -1313,19 +1204,75 @@ def catalog_page():
             show_tool_link(link_row["website"], name)
 
 
+# Give the Creators link a real page instead of sending visitors to Home.
+def creators_page():
+    st.header("About the Creators")
+    st.write(
+        "Built by The Vipers, Team 62, for the AI for Small Business Hackathon: "
+        "Usman, Natalie, and Will, team lead."
+    )
+    if TEAM_CONTRIBUTIONS:
+        st.write("**Who did what**")
+        for member, contribution in TEAM_CONTRIBUTIONS.items():
+            st.write(f"{member}: {contribution}")
+    if OUTSIDE_COACHING:
+        st.write("**Coaching and outside help we acknowledge**")
+        for line in OUTSIDE_COACHING:
+            st.write(line)
+    st.caption(
+        "The Hackathon is run for the Smith Master Student Association at the "
+        "University of Maryland. As the Hackathon rules state, rights to submissions "
+        "belong to the University of Maryland."
+    )
+
+
 # Build the pages once so the links and the router use the same page objects.
 home_ref = st.Page(home_page, title="Home", url_path="home", default=True)
 catalog_ref = st.Page(catalog_page, title="Catalog", url_path="catalog")
 about_ref = st.Page(about_page, title="About the Website", url_path="about")
+creators_ref = st.Page(creators_page, title="About the Creators", url_path="creators")
 # Register pages before rendering links to them.
-page = st.navigation([home_ref, catalog_ref, about_ref], position="hidden")
+page = st.navigation([home_ref, catalog_ref, about_ref, creators_ref], position="hidden")
 
 # Native page links navigate without a full browser reload. This preserves Vee's chat.
 st.markdown("""
 <style>
-/* Match the website's navigation palette without changing the app layout. */
-[data-testid="stPageLink"] a { text-decoration: none; font-weight: 650; }
+/* Keep all navigation links readable and styled the same way. */
 [data-testid="stPageLink"] { margin-top: 0.15rem; }
+[data-testid="stPageLink"] a {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid transparent;
+    border-radius: 0.55rem;
+    padding: 0.35rem 0.65rem;
+    color: #e6f3fa !important;
+    background: transparent !important;
+    text-decoration: none !important;
+    font-weight: 650;
+}
+[data-testid="stPageLink"] a:hover,
+[data-testid="stPageLink"] a:focus-visible {
+    background: #263d4a;
+    color: #ffffff !important;
+}
+/* Mark the current page without changing the chat session. */
+[data-testid="stPageLink"] a[aria-current="page"] {
+    background: #263d4a;
+    color: #ffffff !important;
+}
+[data-testid="stPageLink"] a p,
+[data-testid="stPageLink"] a span {
+    color: inherit !important;
+    background: transparent !important;
+}
+/* Remove the unintended muted/gray link background. */
+[data-testid="stPageLink"] [data-testid="stMarkdownContainer"] {
+    background: transparent !important;
+}
+/* Keep the header usable on narrow mobile screens. */
+@media (max-width: 780px) {
+    [data-testid="stPageLink"] a { padding: 0.3rem 0.4rem; font-size: 0.85rem; }
+}
 </style>
 """, unsafe_allow_html=True)
 logo_col, home_col, catalog_col, about_col, creators_col = st.columns([3, 1, 1, 1.8, 1.8], vertical_alignment="center")
@@ -1338,8 +1285,7 @@ with catalog_col:
 with about_col:
     st.page_link(about_ref, label="About the Website")
 with creators_col:
-    # Creator information lives on the Home page alongside About the Website.
-    st.page_link(home_ref, label="About the Creators")
+    st.page_link(creators_ref, label="About the Creators")
 
 # Display the selected page after the navigation bar.
 page.run()
