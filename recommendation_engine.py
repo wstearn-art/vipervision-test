@@ -43,102 +43,87 @@ def _tags(value):
     return {item.strip() for item in str(value or "").split(";") if item.strip()}
 
 
-def required_capabilities(job, challenge="", goal=""):
-    text = f"{challenge} {goal}".casefold()
-    if job == "Scheduling":
-        if re.search(r"\b(crew|dispatch|route|field team|field staff)\b", text):
-            return ["crew_dispatch"]
-        if re.search(r"\b(double[- ]book(?:ing|ed)?|appointment conflicts?|booking conflicts?)\b", text) and not re.search(r"\b(staff|employees?|workers?|shifts?)\b", text):
-            return ["appointment_booking"]
-        if re.search(r"\b(forecast|forecasting|predict(?:ion|ive)?)\b", text):
-            caps = ["employee_scheduling", "advanced_labor_forecasting"]
-            if re.search(r"\b(labor cost|labor costs|labor spend|overtime|labor planning)\b", text):
-                caps.append("labor_cost_management")
-            if re.search(r"\b(swap|swaps|shift pool|shift trade)\b", text):
-                caps.append("shift_swap_management")
-            return caps
-        if re.search(r"\b(labor cost|labor costs|labor spend|overtime|labor planning)\b", text):
-            caps = ["employee_scheduling", "labor_cost_management"]
-            if re.search(r"\b(swap|swaps|shift pool|shift trade)\b", text):
-                caps.append("shift_swap_management")
-            if re.search(r"\b(forecast|forecasting|predict(?:ion|ive)?)\b", text):
-                caps.append("advanced_labor_forecasting")
-            return caps
-        caps = ["employee_scheduling"]
-        if re.search(r"\b(swap|swaps|shift pool|shift trade)\b", text):
-            caps.append("shift_swap_management")
-        return caps
-    if job == "Bookings":
-        if re.search(r"\b(crew|dispatch|route)\b", text):
-            return ["crew_dispatch"]
-        return ["appointment_booking"]
-    if job == "Customer Questions":
-        if re.search(r"\b(draft|write|compose)\b.*\b(repl(?:y|ies)|response|responses|message|messages)\b", text):
-            return ["draft_customer_responses"]
-        if re.search(r"\b(call|calls|phone|missed call|answering while|incoming call)\b", text):
-            caps = ["inbound_call_answering"]
-            if re.search(r"\b(question|questions|faq|common customer)\b", text):
-                caps.append("customer_question_answering")
-            return caps
-        return ["customer_question_answering"]
-    if job == "Reviews":
-        return ["review_response_drafting"]
-    if job == "Social media":
-        return ["social_content_creation"]
-    if job == "Marketing":
-        if re.search(r"\b(foot traffic|increase traffic|more customers|attract customers|customer acquisition|bring in customers)\b", text):
-            return ["local_customer_acquisition"]
-        return ["marketing_content_generation"]
-    if job == "Accounting":
-        return ["accounting_document_processing"]
-    if job == "Estimating":
-        return ["property_measurement_takeoff"]
-    if job == "Landscape Design":
-        return ["landscape_concept_design"]
-    if job == "Daily operations":
-        if re.search(r"\b(inventory|food cost|invoice|forecast|production)\b", text):
-            caps = []
-            if re.search(r"\b(inventory|food cost)\b", text): caps.append("inventory_management")
-            if re.search(r"\b(invoice|invoices)\b", text): caps.append("invoice_processing")
-            if re.search(r"\b(forecast|forecasting)\b", text): caps.append("food_demand_forecasting")
-            if re.search(r"\b(production|prep)\b", text): caps.append("kitchen_production_planning")
-            return caps
-        return ["general_business_assistance"]
-    return []
-
-
-CAPABILITY_WORDS = {
-    "employee_scheduling": ("employee scheduling", "staff scheduling", "shift schedule", "schedule shifts"),
-    "shift_swap_management": ("shift swap", "shift swaps", "shift trade", "shift trades"),
-    "labor_cost_management": ("labor cost", "labor costs", "overtime", "labor planning"),
-    "advanced_labor_forecasting": ("forecast", "forecasting", "predictive labor"),
-    "appointment_booking": ("appointment booking", "book appointments", "double booking"),
-    "inbound_call_answering": ("answer calls", "missed calls", "phone calls", "call answering"),
-    "customer_question_answering": ("answer customer questions", "customer faqs", "answer inquiries"),
-    "draft_customer_responses": ("draft customer responses", "write customer replies"),
-    "social_content_creation": ("social posts", "social content", "instagram posts", "facebook posts"),
-    "marketing_content_generation": ("marketing content", "marketing copy", "promotional content"),
+# Interpret workflow wording once, before evaluating catalog plans.
+CAPABILITY_PATTERNS = {
+    "crew_dispatch": r"\b(?:crews? schedul\w*|schedul\w* crews?|coordinat\w* crews?|assign\w* (?:landscaping )?crews?|crew dispatch|dispatch|routing|field teams? schedul\w*)\b",
+    "personal_task_scheduling": r"\b(?:personal (?:calendar|schedul\w*|task planning)|schedule tasks)\b",
+    "employee_scheduling": r"\b(?:(?:employee|staff|shift|workforce)\s+(?:shift\s+)?schedul\w*|schedul\w*\s+(?:employees|staff|shifts)|timekeeping|timesheets?|time clocks?)\b",
+    "shift_swap_management": r"\b(?:shift (?:swaps?|swapping|trades?|trading|pool)|swap shifts)\b",
+    "labor_cost_management": r"\b(?:labou?r (?:costs?|spend|planning)|overtime)\b",
+    "advanced_labor_forecasting": r"\b(?:(?:advanced |hourly |predictive )?labou?r forecast\w*|forecast\w* (?:labou?r|staffing))\b",
+    "appointment_booking": r"\b(?:appointment bookings?|book appointments?|booking appointments?|double book\w*|appointment conflicts?|booking conflicts?)\b",
+    "customer_appointment_updates": r"\b(?:(?:automated |customer |appointment )?appointment (?:reminders?|updates?)|customer reminders?|customer updates?|communicat\w* with customers|customer communication)\b",
+    "inbound_call_answering": r"\b(?:missed calls?|answer(?:ing)? (?:customer |incoming )?calls?|call answering|phone calls?|incoming calls?)\b",
+    "customer_question_answering": r"\b(?:customer (?:questions?|faqs)|answer inquiries|faq)\b",
+    "draft_customer_responses": r"\b(?:draft|write|compose)\w* (?:customer )?(?:replies|responses?|messages?)\b",
+    "review_response_drafting": r"\b(?:reviews?|review responses?)\b",
+    "social_content_creation": r"\b(?:social media|social posts?|social content|instagram|facebook|tiktok|reels?)\b",
+    "marketing_content_generation": r"\b(?:marketing|marketing copy|promotional content|campaigns?|advertising)\b",
+    "local_customer_acquisition": r"\b(?:foot traffic|more (?:local )?(?:customers|visitors)|attract\w* (?:more )?(?:local )?customers|customer acquisition|bring in customers|increase traffic)\b",
+    "accounting_document_processing": r"\b(?:accounting|bookkeeping|receipts?|accounting documents?)\b",
+    "property_measurement_takeoff": r"\b(?:property measurements?|takeoffs?|estimating|estimates?)\b",
+    "landscape_concept_design": r"\b(?:landscape design|landscaping designs?|design concepts?)\b",
+    "inventory_management": r"\b(?:inventory|food cost|track materials|tracking materials)\b",
+    "invoice_processing": r"\b(?:invoices?|invoice processing)\b",
+    "food_demand_forecasting": r"\b(?:(?:food|restaurant|kitchen|meal) (?:demand )?forecast\w*|forecast\w* (?:food|meal) demand)\b",
+    "inventory_forecasting": r"\b(?:inventory forecast\w*|forecast\w* inventory)\b",
+    "kitchen_production_planning": r"\b(?:kitchen production|production planning|prep planning)\b",
+    "general_business_assistance": r"\b(?:general business (?:help|assistance)|daily operations)\b",
 }
 
 
+def required_capabilities(job, challenge="", goal=""):
+    """Read all explicit workflows, independently of industry or category."""
+    text = re.sub(r"[-–—]", " ", f"{challenge} {goal}".casefold())
+    caps = []
+    for capability, pattern in CAPABILITY_PATTERNS.items():
+        for match in re.finditer(pattern, text):
+            prefix = re.split(r"[.;!?]|\b(?:but|and)\b", text[:match.start()])[-1]
+            suffix = text[match.end():].split(".")[0]
+            if re.search(r"\b(?:don't|do not|no longer) (?:need|want|require)\b|\b(?:forget|remove|drop|not)\s*$", prefix):
+                continue
+            if re.match(r"\s+(?:alone\s+)?(?:will not solve|is not needed|isn't needed|not required)\b", suffix):
+                continue
+            caps.append(capability)
+            break
+    if "local_customer_acquisition" in caps and not re.search(r"\b(?:copy|content|campaigns?)\b", text):
+        caps = [c for c in caps if c != "marketing_content_generation"]
+    if re.search(r"\bforecast(?:ing)?\b", text) and not any("forecast" in c for c in caps):
+        if "inventory_management" in caps:
+            caps.append("inventory_forecasting")
+        elif "employee_scheduling" in caps or "labor_cost_management" in caps:
+            caps.append("advanced_labor_forecasting")
+    # Empty legacy calls support catalog diagnostics, never a saved profile.
+    if not text.strip():
+        defaults = {"Scheduling": "employee_scheduling", "Bookings": "appointment_booking",
+                    "Customer Questions": "customer_question_answering", "Reviews": "review_response_drafting",
+                    "Social media": "social_content_creation", "Marketing": "marketing_content_generation",
+                    "Accounting": "accounting_document_processing", "Estimating": "property_measurement_takeoff",
+                    "Landscape Design": "landscape_concept_design", "Daily operations": "general_business_assistance"}
+        return [defaults[job]] if job in defaults else []
+    return sorted(set(caps))
+
+
 def split_requirements(job, challenge="", goal="", explicit_preferred=None):
-    """Separate explicitly preferred features from essential workflow needs."""
-    text = f"{challenge} {goal}".casefold()
+    """Separate optional preferences from essential capabilities."""
+    text = re.sub(r"[-–—]", " ", f"{challenge} {goal}".casefold())
     essential = required_capabilities(job, challenge, goal)
-    preferred = list(explicit_preferred or [])
+    preferred = set(explicit_preferred or [])
     for capability in list(essential):
-        phrases = CAPABILITY_WORDS.get(capability, (capability.replace("_", " "),))
-        for phrase in phrases:
-            for match in re.finditer(re.escape(phrase), text):
-                prefix = text[max(0, match.start() - 55):match.start()]
-                if re.search(r"\b(prefer|would like|nice to have|optional|not essential)\b[^.;!?]*$", prefix):
-                    essential.remove(capability)
-                    if capability not in preferred:
-                        preferred.append(capability)
-                    break
-            if capability not in essential:
-                break
-    return essential, preferred
+        matches = list(re.finditer(CAPABILITY_PATTERNS.get(capability, r"(?!)"), text))
+        if matches and all(re.search(r"\b(?:prefer|would like|nice to have|optional|not essential)\b[^.;!?]*$",
+                                    text[max(0, m.start()-70):m.start()]) for m in matches):
+            essential.remove(capability)
+            preferred.add(capability)
+    return essential, sorted(preferred - set(essential))
+
+
+def profile_capabilities(req, job=None):
+    """Saved capabilities take precedence over compatibility-only text inputs."""
+    if "essential_capabilities" in req:
+        return list(req["essential_capabilities"]), list(req.get("optional_capabilities", []))
+    return split_requirements(job, req.get("challenge", ""), req.get("goal", ""),
+                              req.get("preferred_capabilities"))
 
 
 def _required_seats(req):
@@ -291,12 +276,12 @@ def _classify_plan(tool, plan, req, required, preferred):
         "preferred_capabilities": list(preferred),
     }
 
-    if not required:
-        record.update(fit_classification=FIT_RESEARCH,
-                      fit_reason="The customer's required workflow could not be identified.")
-    elif cost["status"] == "ineligible":
+    if cost["status"] == "ineligible":
         record.update(fit_classification="Ineligible",
                       fit_reason="The known required plan cost or limit exceeds the customer's requirement.")
+    elif not required:
+        record.update(fit_classification=FIT_RESEARCH,
+                      fit_reason="The customer's required workflow could not be identified.")
     elif cost["status"] == "unknown" or not documented:
         if exact:
             record.update(fit_classification=FIT_RESEARCH,
@@ -304,6 +289,10 @@ def _classify_plan(tool, plan, req, required, preferred):
         else:
             record.update(fit_classification="Ineligible",
                           fit_reason="No documented capability supports the stated workflow.")
+    elif req.get("unresolved_requirements") and exact:
+        record.update(fit_classification=FIT_RESEARCH,
+                      fit_reason="Customer requirements still need clarification: "
+                      + "; ".join(req["unresolved_requirements"]))
     elif cost["status"] == "confirmed" and not missing:
         record.update(fit_classification=FIT_STRONG,
                       fit_reason="Required capabilities and the selected plan's total cost are documented within budget.")
@@ -327,6 +316,7 @@ def _classify_plan(tool, plan, req, required, preferred):
 def _fit_order(item):
     rank = {FIT_STRONG: 0, FIT_PARTIAL: 1, FIT_RESEARCH: 2}
     return (rank.get(item.get("fit_classification"), 3),
+            not (item.get("prefer_free") and item.get("cost") == 0),
             -len(item.get("covered_capabilities", [])),
             -len(set(item.get("preferred_capabilities", [])) & set(item.get("capabilities", []))),
             item.get("cost") if item.get("cost") is not None else float("inf"),
@@ -362,44 +352,44 @@ def evaluate_tool(tool, plans, req, required=None, preferred=None):
     return evaluated[0]
 
 
-def score_tools(data, job, cap, comfort, requirements, plans):
-    """Return only affordable Strong Fit and Partial Fit products."""
-    req = dict(requirements or {})
-    req["budget"] = cap
-    required, preferred = split_requirements(job, req.get("challenge", ""), req.get("goal", ""),
-                                             req.get("preferred_capabilities"))
-    preference_text = f"{req.get('challenge', '')} {req.get('goal', '')}".casefold()
-    if re.search(r"\b(prefer|would like|nice to have|optional)\b.*\b(free|prefer free)\b", preference_text):
-        req["prefer_free"] = True
-    results = []
+def evaluate_catalog(data, req, plans):
+    """Evaluate every product against the same saved customer requirements."""
+    required, preferred = profile_capabilities(req, req.get("job"))
+    output = []
     for _, series in data.iterrows():
-        tool = series.to_dict()
-        plan = evaluate_tool(tool, plans, req, required, preferred)
-        if plan.get("fit_classification") not in {FIT_STRONG, FIT_PARTIAL}:
-            continue
-        item = {**plan, "tool": series, "eligibility": plan["fit_classification"],
-                "pricing": plan, "reasons": plan.get("reasons", [])}
-        results.append(item)
-    results.sort(key=lambda item: _fit_order({**item, "tool_name": item["tool"]["tool_name"]}))
-    return results
+        plan = evaluate_tool(series.to_dict(), plans, req, required, preferred)
+        output.append({**plan, "tool": series, "eligibility": plan["fit_classification"],
+                       "pricing": plan, "reasons": plan.get("reasons", []),
+                       "profile_revision": req.get("revision", 0), "prefer_free": req.get("prefer_free", False)})
+    output.sort(key=lambda item: _fit_order({**item, "tool_name": item["tool"]["tool_name"]}))
+    return output
+
+
+def score_tools(data, job, cap, comfort, requirements, plans):
+    """Compatibility API; no numerical scoring or category-specific evaluation."""
+    req = {**(requirements or {}), "budget": cap}
+    req.setdefault("job", job)
+    return [item for item in evaluate_catalog(data, req, plans)
+            if item["fit_classification"] in {FIT_STRONG, FIT_PARTIAL}]
 
 
 def research_leads(data, job, cap, comfort, requirements, plans):
-    req = dict(requirements or {})
-    req["budget"] = cap
-    required, preferred = split_requirements(job, req.get("challenge", ""), req.get("goal", ""),
-                                             req.get("preferred_capabilities"))
-    output = []
-    for _, series in data.iterrows():
-        tool = series.to_dict()
-        plan = evaluate_tool(tool, plans, req, required, preferred)
-        if plan.get("fit_classification") != FIT_RESEARCH or plan.get("status") == "ineligible":
-            continue
-        if not plan.get("covered_capabilities"):
-            continue
-        output.append({**plan, "tool": series, "eligibility": FIT_RESEARCH,
-                       "pricing": plan, "reasons": plan.get("reasons", [])})
-    output.sort(key=lambda item: (-len(item.get("covered_capabilities", [])),
-                                  item.get("lower_bound") if item.get("lower_bound") is not None else float("inf"),
-                                  str(item["tool"]["tool_name"]).casefold()))
-    return output
+    req = {**(requirements or {}), "budget": cap}
+    req.setdefault("job", job)
+    return [item for item in evaluate_catalog(data, req, plans)
+            if item["fit_classification"] == FIT_RESEARCH
+            and item["status"] != "ineligible" and item.get("covered_capabilities")]
+
+
+def plan_price_summary(plan):
+    """Use the same complete-cost calculation for catalog summaries."""
+    cost = _plan_cost(plan, {})
+    if cost["status"] == "confirmed":
+        summary = f"${cost['cost']:,.2f}/month total ({cost['reason']})"
+    else:
+        floor = cost.get("lower_bound")
+        summary = (f"known minimum ${floor:,.2f}/month; " if floor is not None else "")
+        summary += "total unverified (" + cost["reason"] + ")"
+    if plan.get("billing_term"):
+        summary += "; " + plan["billing_term"]
+    return summary

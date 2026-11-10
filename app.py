@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from vee_chat import render_vee_chat, _call_ai
+from vee_chat import render_vee_chat, _call_ai, _current_evaluation
 from recommendation_engine import (
     evaluate_tool as engine_evaluate_tool, load_plan_catalog,
     research_leads as engine_research_leads, score_tools as engine_score_tools,
-    split_requirements,
+    profile_capabilities, plan_price_summary, evaluate_catalog as engine_evaluate_catalog,
 )
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
@@ -177,11 +177,12 @@ def business_tools(data, business_type):
 def evaluate_plan_cost(tool, requirements=None):
     """Evaluate the lowest evidence-backed plan that covers required capabilities."""
     req = dict(requirements or {})
-    challenge = req.get("job") or str(tool.get("challenge", ""))
-    goal = req.get("goal", "")
-    required, preferred = split_requirements(challenge, req.get("challenge_text", req.get("challenge", "")),
-                                             goal, req.get("preferred_capabilities"))
+    required, preferred = profile_capabilities(req, req.get("job"))
     return engine_evaluate_tool(tool, tool_plans, req, required, preferred)
+
+
+def evaluate_catalog(data, requirements):
+    return engine_evaluate_catalog(data, requirements, tool_plans)
 
 
 def score_tools(data, job, cap, comfort, requirements=None):
@@ -202,22 +203,8 @@ def find_research_leads(data, job, cap, comfort, requirements=None):
 
 
 def plan_summary(tool_name):
-    summaries = []
-    for row in tool_plans:
-        if row["tool_name"] != tool_name:
-            continue
-        amount = row.get("monthly_price", "")
-        channel = row.get("per_channel_cost", "")
-        if amount:
-            suffix = f"${float(amount):,.2f}/mo"
-        elif channel:
-            suffix = f"${float(channel):,.2f}/channel/month equivalent"
-        else:
-            suffix = "total unknown"
-        if "annual" in str(row.get("billing_term", "")).casefold():
-            suffix += " (annual billing)"
-        summaries.append(f"{row['plan_name']}: {suffix}")
-    return "; ".join(summaries)
+    return "; ".join(f"{row['plan_name']}: {plan_price_summary(row)}"
+                     for row in tool_plans if row["tool_name"] == tool_name)
 
 
 @st.cache_data
@@ -248,39 +235,6 @@ def show_tool_link(url, name=None):
     label = f"Visit {name} website" if name else "Visit provider website"
     st.markdown(f"[{label}]({url})")
 
-def team_size_note(tool, employees):
-    """Describe a free-plan team limit when the catalog publishes one."""
-    match = re.search(r"Free up to (\d+) (team members|employees)", str(tool["price_note"]))
-    if not match:
-        return None
-    limit = int(match.group(1))
-    if employees <= limit:
-        return f"The free plan covers up to {limit} {match.group(2)}, so a team of {employees} fits."
-    return (
-        f"The free plan covers up to {limit} {match.group(2)}, and your team of "
-        f"{employees} is above that, so expect to need a paid plan."
-    )
-
-def show_tool_result(item, number, employees=None):
-    tool = item["tool"]
-    st.markdown(f"#### {number}. {tool['tool_name']}")
-    st.write(f"**Fit classification:** {item['fit_classification']}")
-    st.write(f"**Price:** {md(tool['price_note'])}")
-    st.write(f"**Setup:** {tool['effort']}")
-    st.write("**Why:** " + md("; ".join(item["reasons"])))
-    if employees:
-        note = team_size_note(tool, employees)
-        if note:
-            st.write(f"**Team size check:** {note}")
-    st.write(f"**What it does well:** {md(tool['pros'])}")
-    st.write(f"**What to check:** {md(tool['cons'])}")
-    show_tool_link(tool["website"])
-    st.caption(
-        f"Price checked {date_label(tool['checked_date'])}. "
-        "Verify the current plan with the provider before purchase."
-    )
-    st.markdown(f"[Source details](https://{tool['source']})")
-
 # This is the AI integration 
 def ai_job_from_text(text):
     """Classify a problem with the same Luna-then-mini fallback as the chat."""
@@ -304,25 +258,6 @@ def job_from_text(text):
             best_job = job
             best_hits = hits
     return best_job
-
-def shortlist_csv(ranked):
-    rows = []
-    for number, item in enumerate(ranked[:3], start=1):
-        tool = item["tool"]
-        rows.append(
-            {
-                "Rank": number,
-                "Tool": tool["tool_name"],
-                "Fit classification": item["fit_classification"],
-                "Selected plan": item["plan"],
-                "Verified monthly cost": item["pricing"]["cost"],
-                "Price": tool["price_note"],
-                "Setup": tool["effort"],
-                "Why it matched": "; ".join(item["reasons"]),
-                "Website": tool["website"],
-            }
-        )
-    return pd.DataFrame(rows).to_csv(index=False)
 
 # The three explore cards. Tool names and counts come straight from the catalog.
 EXPLORE_CARDS = [
@@ -548,13 +483,13 @@ def home_page():
             with st.container(key="vee_chat_box"):
                 render_vee_chat(
                     business_tools=business_tools,
-                    show_tool_result=show_tool_result,
                 tools=tools,
                 business_types=BUSINESS_TYPES,
                 budget_cap=BUDGET_CAP,
                 comfort_options=COMFORT_OPTIONS,
                 score_tools=score_tools,
                 evaluate_plan_cost=evaluate_plan_cost,
+                evaluate_catalog=evaluate_catalog,
                 ai_job_from_text=ai_job_from_text,
                 job_from_text=job_from_text,
                 vee_avatar=vee_avatar,
@@ -586,7 +521,7 @@ def home_page():
                     # Unknown is not zero. Explicit owner confirmation is necessary
                     # before calculating a net estimate, even if the entered value is $0.
                     profile = vee_state.get("answers", {})
-                    custom_key = "roi_custom_" + repr((chosen, profile.get("budget_amount"),
+                    custom_key = "roi_custom_" + repr((chosen, profile.get("revision", 0), profile.get("budget_amount"),
                         profile.get("employees"), profile.get("challenge"), profile.get("goal")))
                     tool_price = float(st.number_input(
                         "Estimated TOTAL monthly tool cost ($)", min_value=0.0,
@@ -1082,6 +1017,13 @@ def catalog_page():
                 "cons": "What to check",
             }
         )
+        state = st.session_state.get("vee_guided", {})
+        if state.get("stage") == "done":
+            evaluation = _current_evaluation(state, tools, score_tools, find_research_leads, evaluate_catalog)
+            decisions = {str(item["tool"]["tool_name"]): item for item in evaluation["all"]}
+            compare["Fit classification"] = compare["Tool"].map(lambda name: decisions[name]["fit_classification"])
+            compare["Assessed plan"] = compare["Tool"].map(lambda name: decisions[name]["plan"])
+            compare["Profile cost assessment"] = compare["Tool"].map(lambda name: decisions[name]["reason"])
         show_table(compare)
         if len(picked) == 1:
             st.info("Pick one or two more tools to compare them side by side.")
