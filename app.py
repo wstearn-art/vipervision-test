@@ -7,7 +7,7 @@ import streamlit as st
 import requests
 from vee_chat import render_vee_chat, _call_ai
 from recommendation_engine import (
-    WEIGHTS, evaluate_tool as engine_evaluate_tool, load_plan_catalog,
+    evaluate_tool as engine_evaluate_tool, load_plan_catalog,
     required_capabilities, research_leads as engine_research_leads,
     score_tools as engine_score_tools, split_requirements,
 )
