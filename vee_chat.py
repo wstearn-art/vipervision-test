@@ -166,16 +166,18 @@ def catalog_tool_commentary(tool):
 
 
 def _number_of_people(message):
-    lower = message.lower()
-    if re.search(r"\b(just me|only me|myself|solo)\b", lower):
-        return 1
-    match = re.search(r"\b(\d{1,5})\b", lower)
-    if match:
-        count = int(match.group(1))
-        return count if 1 <= count <= 100000 else None
-    for word, count in NUMBERS.items():
-        if re.search(r"\b" + word + r"\b", lower):
-            return count
+    """Read a headcount without confusing a price with a person."""
+    # Prefer a number attached to people, even if the sentence contains $10.
+    count = _early_employee_count(message)
+    if count is not None:
+        return count
+    text = str(message).strip().casefold()
+    # Bare answers are valid when Vee is asking about employees.
+    number = re.fullmatch(r"(?:there (?:are|is)\s+)?(\d{1,5}|" + "|".join(NUMBERS) + r")(?:\s+(?:people|employees?|staff|workers))?[.! ]*", text)
+    if number:
+        token = number.group(1)
+        value = int(token) if token.isdigit() else NUMBERS.get(token)
+        return value if value and 1 <= value <= 100000 else None
     return None
 
 
@@ -192,21 +194,24 @@ def _free_preference(message):
 
 
 def _early_employee_count(message):
-    """Recognize team counts even when the question is about something else."""
+    """Only capture numbers connected to a person's team size."""
     text = str(message).casefold()
+    quantity = r"(\d{1,5}|" + "|".join(NUMBERS) + r")"
     patterns = (
-        r"\b(?:team of|staff of|crew of|have|with|employ|employing)\s+(\d{1,5}|" + "|".join(NUMBERS) + r")\s+(?:employees?|people|staff|workers|team members?)\b",
-        r"\b(\d{1,5}|" + "|".join(NUMBERS) + r")\s+(?:employees?|people on (?:my|our|the) team|staff members?|workers)\b",
-        r"\b(?:my|our)\s+team\s+(?:has|is)\s+(\d{1,5}|" + "|".join(NUMBERS) + r")\b",
+        r"\b(?:team of|staff of|crew of|have|with|employ|employing|there (?:are|is))\s+" + quantity + r"\s+(?:employees?|people|staff|workers|team members?)\b",
+        r"\b" + quantity + r"\s+(?:employees?|staff members?|workers|people(?:\s+(?:total|on (?:my|our|the) team))?|team members?)\b",
+        r"\b(?:my|our)\s+team\s+(?:has|is|consists of)\s+" + quantity + r"\b",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            count = match.group(1)
-            value = int(count) if count.isdigit() else NUMBERS.get(count)
+            token = match.group(1)
+            value = int(token) if token.isdigit() else NUMBERS.get(token)
             if value and 1 <= value <= 100000:
                 return value
-    return 1 if re.search(r"\b(?:solo owner|one.person business|just me|only me)\b", text) else None
+    if re.search(r"\b(?:solo owner|one.person business|just me|only me|myself|i(?:'m| am) the only employee|only employee|one person total)\b", text):
+        return 1
+    return None
 
 
 def _early_comfort(message, options):
@@ -216,7 +221,7 @@ def _early_comfort(message, options):
         return _comfort("beginner", options)
     if re.search(r"\b(?:comfortable|confident|happy|willing|open to)\s+(?:with\s+)?(?:learning|using|trying)\s+(?:new\s+)?(?:software|technology|tools|tech)\b", text):
         return _comfort("comfortable learning software", options)
-    if re.search(r"\b(?:tech beginner|very limited tech experience|not tech savvy|little technical experience|prefer simple software)\b", text):
+    if re.search(r"\b(?:tech beginner|beginner technical experience|beginner tech experience|very limited tech experience|not tech savvy|little technical experience|prefer simple software)\b", text):
         return _comfort("beginner", options)
     return None
 
@@ -238,6 +243,91 @@ def _capture_early_answers(answers, message, comfort_options):
         answers["prefer_free"] = free
 
 
+def _explicit_business(message):
+    """Recognize a business introduction without guessing from unrelated words."""
+    text = str(message).strip()
+    match = re.search(
+        r"\b(?:i\s+(?:run|own|operate|manage|have)|my business is|we run|we own)\s+"
+        r"(?:a|an|the|small)\s+(.+?)(?=[,.;!?]|\s+(?:with|and (?:we|i)|where|that|we're|i'm)\b|$)",
+        text, re.I)
+    return match.group(1).strip()[:100] if match else None
+
+
+def _explicit_challenge(message):
+    """Keep an explicitly described problem for the challenge classifier."""
+    text = str(message).strip()
+    match = re.search(
+        r"\b(?:we(?:'re| are) struggling with|i(?:'m| am) struggling with|"
+        r"our (?:biggest |main )?(?:challenge|problem) is|"
+        r"the (?:biggest |main )?(?:challenge|problem) is|"
+        r"we (?:need help with|have trouble with)|i need help with)\s+"
+        r"(.+?)(?=[.;!?]|\s+and\s+(?:i(?:'m| am)|my budget|we have)|$)",
+        text, re.I)
+    return match.group(1).strip()[:350] if match else None
+
+
+def _explicit_goal(message):
+    """Only skip the goal question when an outcome is clearly stated."""
+    match = re.search(
+        r"\b(?:my goal is|our goal is|the outcome i want is|"
+        r"what i want to achieve is|our priority is)\s+(.+?)(?=[.;!?]|$)",
+        str(message), re.I)
+    return match.group(1).strip()[:300] if match else None
+
+
+def _capture_profile_context(state, message, business_types, comfort_options,
+                             budget_cap, ai_job_from_text, job_from_text):
+    """Save clear answers from any turn, even before Vee asks for them."""
+    answers = state["answers"]
+    _capture_early_answers(answers, message, comfort_options)
+
+    # Accept corrections during intake, not just after recommendations.
+    budget_edit = _budget_update_intent(message)
+    ambiguous = budget_edit and _budget_is_ambiguous(message)
+    amount = _monthly_budget(message) if budget_edit and not ambiguous else None
+    if amount is not None:
+        answers["budget_amount"] = amount
+        answers["budget"] = _budget_label(amount, budget_cap)
+        answers["raw_budget"] = message
+        st.session_state.pop("vee_inline_followup", None)
+    elif "budget_amount" not in answers and not ambiguous:
+        # Only interpret a budget early when the owner explicitly names a limit.
+        if re.search(r"\b(?:my|our)\s+(?:monthly\s+)?(?:budget|max(?:imum)?(?:\s+budget)?|limit|ceiling)\s+(?:is|of|at)\b", message, re.I):
+            early = _monthly_budget(message)
+            if early is not None:
+                answers["budget_amount"] = early
+                answers["budget"] = _budget_label(early, budget_cap)
+                answers["raw_budget"] = message
+
+    business = _explicit_business(message)
+    if business and "business" not in answers:
+        answers["business"] = business
+        answers["catalog_business"] = _business_type(business, business_types)
+
+    # Classify a challenge before letting progression skip its question.
+    challenge = _explicit_challenge(message)
+    if challenge and "challenge" not in answers:
+        answers["challenge"] = challenge
+        category = ai_job_from_text(challenge)
+        state["classification_source"] = "OpenRouter" if category else "Keyword fallback"
+        preliminary = category or job_from_text(challenge)
+        answers["initial_ai_job"] = category
+        answers["initial_job"] = preliminary
+        answers["job"] = (_matching_jobs(challenge, preliminary) or [preliminary])[0]
+        if answers["job"] != preliminary:
+            state["classification_source"] = "Catalog intent rules"
+        state["goal_question"] = _goal_question(state)
+
+    goal = _explicit_goal(message)
+    if goal and "goal" not in answers:
+        answers["goal"] = goal
+        if "challenge" in answers:
+            jobs = _matching_jobs(answers["challenge"], answers.get("job"), goal)
+            if jobs:
+                answers["job"] = jobs[0]
+    return budget_edit, ambiguous, amount
+
+
 def _next_unanswered(current, answers):
     """Skip questions the owner already answered naturally."""
     for field in FIELDS[FIELDS.index(current) + 1:]:
@@ -255,6 +345,13 @@ def _monthly_budget(message):
     text = str(message).lower().replace(",", "").strip()
     if re.search(r"\b(any price|any budget|unlimited|no (?:spending |budget )?limit|whatever it costs|no maximum|flexible budget|budget is flexible)\b", text):
         return float("inf")
+    # A named budget edit is more reliable than other dollar amounts in the reply.
+    direct_edit = re.search(
+        r"\b(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
+        r"(?:my|our|the)\s+(?:monthly\s+)?(?:maximum|maximum budget|max|limit|ceiling)\s+"
+        r"(?:budget\s+)?(?:to|at)\s*\$?\s*(\d+(?:\.\d+)?)\b", text)
+    if direct_edit:
+        return float(direct_edit.group(1))
     # Explicit old -> new corrections should always use the destination amount.
     transition = re.search(r"\bfrom\s+\$?\s*\d+(?:\.\d+)?\s+to\s+\$?\s*(\d+(?:\.\d+)?)\b", text)
     if transition:
@@ -326,6 +423,18 @@ def _budget_update_intent(message):
         return False
     if re.search(r"\b(?:keep|leave|remain|stay)\b.{0,35}\b(?:budget|unchanged|same)\b", text):
         return False
+    # Accept an explicit budget correction after another answered question.
+    if re.search(r"(?:^|[.!;]\s*)(?:(?:please|actually|explicitly|now)\s*[,.:]?\s*)*"
+                 r"(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
+                 r"(?:my|our|the)\s+(?:monthly\s+)?"
+                 r"(?:maximum|maximum budget|max|limit|ceiling)\b", text):
+        return True
+    # Accept explicit corrections to the maximum, not only the word "budget".
+    if re.match(r"^(?:(?:please|actually|explicitly|now)\s*[,.:]?\s*)*"
+                r"(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
+                r"(?:my|our|the)\s+(?:monthly\s+)?"
+                r"(?:maximum|maximum budget|max|limit|ceiling)\b", text):
+        return True
     # Require an actual instruction, not the word 'budget' somewhere in a cost question.
     # A stated maximum is a budget update, even without the word "change".
     if re.match(r"^(?:my|our|the)\s+(?:(?:monthly|total)\s+)?"
@@ -1096,6 +1205,9 @@ def render_vee_chat(
         return
 
     stage = state["stage"]
+    budget_edit, budget_ambiguous, budget_amount = _capture_profile_context(
+        state, reply, business_types, comfort_options, budget_cap,
+        ai_job_from_text, job_from_text)
     error = None
     if stage == "name":
         if _is_greeting(reply):
@@ -1104,13 +1216,15 @@ def render_vee_chat(
             name = _clean_name(reply)
             if not name:
                 error = "What should I call you? Just a first name is fine."
-            elif len(reply) > 120:
+            elif len(reply) > 120 or (not re.search(r"\b(?:call me|my name is|i am|i['’]m)\b", reply, re.I)
+                                          and re.search(r"\b(?:i (?:run|own|operate)|my business is|we run)\b", reply, re.I)):
                 error = "What should I call you? Just a first name is fine."
             else:
                 a["name"] = name
     elif stage == "business":
-        a["business"] = reply
-        a["catalog_business"] = _business_type(reply, business_types)
+        if "business" not in a:
+            a["business"] = reply
+            a["catalog_business"] = _business_type(reply, business_types)
     elif stage == "challenge":
         a["challenge"] = reply
         with st.spinner("Vee is thinking about your challenge..."):
@@ -1157,7 +1271,14 @@ def render_vee_chat(
             a["employees"] = number
             a["raw_employees"] = reply
 
-    if error:
+    # Keep the current intake question if this was only a budget correction.
+    if budget_ambiguous:
+        response = ("I see more than one spending limit. What is your total monthly "
+                    "budget for all tools combined? I haven't changed it yet.")
+    elif error and budget_edit and budget_amount is not None and stage != "budget":
+        response = (f"Budget updated to ${budget_amount:,.0f}/month. "
+                    f"{QUESTIONS[stage]}")
+    elif error:
         response = error
     else:
         # Save details given early, then skip questions we already know.
