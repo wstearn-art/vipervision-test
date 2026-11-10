@@ -1056,7 +1056,7 @@ def about_page():
                 "Sources and dates are shown with each catalog entry. Provider pricing "
                 "should be checked again before purchase."
             )
-            free_count = int((tools["free_price"] == 0).sum())
+            free_count = int(tools.apply(has_free_starting_plan, axis=1).sum())
             quote_count = int(tools["monthly_cost"].isna().sum())
             one_tool_jobs = sorted(
                 job_name
@@ -1074,7 +1074,7 @@ def about_page():
             )
             st.write("**Catalog coverage by job**")
             flags = tools.assign(
-                free_start=tools["free_price"].eq(0),
+                free_start=tools.apply(has_free_starting_plan, axis=1),
                 quote_only=tools["monthly_cost"].isna(),
                 easy_setup=tools["effort"].eq("Easy"),
             )
@@ -1211,6 +1211,14 @@ def about_page():
 
 
 # Catalog page: the full list of tools on its own page
+def has_free_starting_plan(tool):
+    """A free entry plan does not imply the required AI feature is free."""
+    if str(tool.get("tool_name", "")).casefold() == "7shifts":
+        return "comp free" in str(tool.get("price_note", "")).casefold()
+    value = tool.get("free_price")
+    return pd.notna(value) and float(value) == 0
+
+
 def catalog_page():
     # Catalog
     st.header("Catalog: all tools")
@@ -1234,7 +1242,7 @@ def catalog_page():
     if business_filter != "All":
         shown = business_tools(shown, business_filter)
     if free_only:
-        shown = shown[shown["free_price"] == 0]
+        shown = shown[shown.apply(has_free_starting_plan, axis=1)]
     if search_text.strip():
         words = search_text.strip().lower()
         haystack = (
@@ -1281,8 +1289,8 @@ def catalog_page():
     )
     if picked:
         compare = tools.set_index("tool_name").loc[picked].reset_index()
-        compare["free_start"] = compare["free_price"].apply(
-            lambda value: "Yes" if pd.notna(value) and value == 0 else "No"
+        compare["free_start"] = compare.apply(
+            lambda row: "Yes (AI tier may be paid)" if has_free_starting_plan(row) else "No", axis=1
         )
         compare = compare[
             ["tool_name", "challenge", "price_note", "free_start", "effort", "pros", "cons"]

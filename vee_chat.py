@@ -6,11 +6,18 @@ verified catalog entries. If AI is unavailable, the intake still works.
 """
 
 import json
+import logging
 import re
 
 import requests
 import pandas as pd
 import streamlit as st
+
+logger = logging.getLogger("vipervision.ai")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    # Send private model diagnostics to Streamlit's server logs.
+    logger.addHandler(logging.StreamHandler())
 
 MODEL = "openai/gpt-6-luna"
 FALLBACK_MODEL = "openai/gpt-4o-mini"
@@ -43,6 +50,8 @@ def _record_ai_status(status, *, http_status=None, usage=None):
         diag["failures"] += 1
     diag["last_status"] = status
     diag["last_http_status"] = http_status
+    # Log model status without storing customer messages or API keys.
+    logger.info("Vee AI request: status=%s http=%s", status, http_status)
     if isinstance(usage, dict):
         for source, target in (("prompt_tokens", "input_tokens"),
                                ("completion_tokens", "output_tokens")):
@@ -95,8 +104,16 @@ def _call_ai(system, user_messages, *, max_tokens=180):
                 _record_ai_status(f"{model}: Empty response", http_status=response.status_code,
                                   usage=payload.get("usage"))
                 continue
+            # Use the returned model when OpenRouter includes one.
+            reported = payload.get("model")
+            actual_model = reported if isinstance(reported, str) and reported.strip() else None
+            fallback_used = model == FALLBACK_MODEL
             _record_ai_status("Success", http_status=response.status_code, usage=payload.get("usage"))
-            st.session_state["vee_last_ai_model"] = model
+            st.session_state["vee_last_ai_model"] = actual_model
+            st.session_state["vee_last_ai_requested_model"] = model
+            st.session_state["vee_last_ai_fallback"] = fallback_used
+            logger.info("Vee AI completed: requested=%s reported=%s fallback=%s",
+                        model, actual_model or "not supplied", fallback_used)
             return content
         except requests.Timeout:
             _record_ai_status(f"{model}: Timeout")
@@ -160,6 +177,74 @@ def _number_of_people(message):
         if re.search(r"\b" + word + r"\b", lower):
             return count
     return None
+
+
+def _free_preference(message):
+    """Read a request to favor free options without changing the spending cap."""
+    text = str(message).casefold()
+    if re.search(r"\b(?:don't|do not|not)\s+(?:prefer|want|need)\s+free\b", text):
+        return False
+    if re.search(r"\b(?:prefer|preferably|ideally|rather|favor|favour)\b.{0,35}\bfree\b", text):
+        return True
+    if re.search(r"\bfree\s+(?:preferred|if possible|first|options?)\b", text):
+        return True
+    return None
+
+
+def _early_employee_count(message):
+    """Recognize team counts even when the question is about something else."""
+    text = str(message).casefold()
+    patterns = (
+        r"\b(?:team of|staff of|crew of|have|with|employ|employing)\s+(\d{1,5}|" + "|".join(NUMBERS) + r")\s+(?:employees?|people|staff|workers|team members?)\b",
+        r"\b(\d{1,5}|" + "|".join(NUMBERS) + r")\s+(?:employees?|people on (?:my|our|the) team|staff members?|workers)\b",
+        r"\b(?:my|our)\s+team\s+(?:has|is)\s+(\d{1,5}|" + "|".join(NUMBERS) + r")\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            count = match.group(1)
+            value = int(count) if count.isdigit() else NUMBERS.get(count)
+            if value and 1 <= value <= 100000:
+                return value
+    return 1 if re.search(r"\b(?:solo owner|one.person business|just me|only me)\b", text) else None
+
+
+def _early_comfort(message, options):
+    """Only store a tech preference when the wording is explicit."""
+    text = str(message).casefold()
+    if re.search(r"\b(?:not comfortable|uncomfortable|struggle)\s+(?:with\s+)?(?:learning|using|new)\s*(?:software|tech|technology|tools)?\b", text):
+        return _comfort("beginner", options)
+    if re.search(r"\b(?:comfortable|confident|happy|willing|open to)\s+(?:with\s+)?(?:learning|using|trying)\s+(?:new\s+)?(?:software|technology|tools|tech)\b", text):
+        return _comfort("comfortable learning software", options)
+    if re.search(r"\b(?:tech beginner|very limited tech experience|not tech savvy|little technical experience|prefer simple software)\b", text):
+        return _comfort("beginner", options)
+    return None
+
+
+def _capture_early_answers(answers, message, comfort_options):
+    """Remember clear details supplied before their dedicated intake question."""
+    if "employees" not in answers:
+        count = _early_employee_count(message)
+        if count is not None:
+            answers["employees"] = count
+            answers["raw_employees"] = message
+    if "comfort" not in answers:
+        preference = _early_comfort(message, comfort_options)
+        if preference is not None:
+            answers["comfort"] = preference
+            answers["raw_comfort"] = message
+    free = _free_preference(message)
+    if free is not None:
+        answers["prefer_free"] = free
+
+
+def _next_unanswered(current, answers):
+    """Skip questions the owner already answered naturally."""
+    for field in FIELDS[FIELDS.index(current) + 1:]:
+        key = "budget_amount" if field == "budget" else field
+        if key not in answers:
+            return field
+    return "done"
 
 
 def _monthly_budget(message):
@@ -649,6 +734,14 @@ def _rank_jobs(pool, jobs, cap, comfort, score_tools, challenge="", goal="", req
     for job in jobs:
         for original in score_tools(pool, job, cap, comfort, requirements):
             tool = original["tool"]
+            price = original.get("pricing")
+            starting_cost = tool.get("monthly_cost")
+            free_start = tool.get("free_price")
+            # Don't suggest a known over-budget paid tool as an unknown-price fit.
+            if (cap != float("inf") and price and price.get("status") == "unknown"
+                    and pd.notna(starting_cost) and float(starting_cost) > cap
+                    and not (pd.notna(free_start) and float(free_start) == 0)):
+                continue
             if _workflow_gap(tool, job, request):
                 continue
             item = dict(original)
@@ -880,6 +973,13 @@ def render_vee_chat(
             requirements = _requirements_from_answers(a)
             ranked = _rank_jobs(pool, jobs, a["budget_amount"], a["comfort"], score_tools,
                                 a.get("challenge", ""), a.get("goal", ""), requirements)
+            if a.get("prefer_free"):
+                # Prefer verified free eligible plans, not merely free trials.
+                ranked.sort(key=lambda item: (
+                    not (item.get("pricing") is not None
+                         and item["pricing"].get("status") == "confirmed"
+                         and item["pricing"].get("cost") == 0),
+                    -item["score"], str(item["tool"]["tool_name"]).casefold()))
             # Share real catalog prices with the ROI calculator below Vee.
             # Quote-only tools require manual entry; never pretend a missing price is $0.
             roi_candidates = []
@@ -902,8 +1002,9 @@ def render_vee_chat(
             st.session_state["vee_roi_candidates"] = roi_candidates
             budget_display = ("No budget ceiling" if a["budget_amount"] == float("inf")
                               else f"Budget up to ${a['budget_amount']:,.0f}/month")
+            free_note = "  ·  Free options preferred" if a.get("prefer_free") else ""
             st.caption(f"{a['business']}  ·  {', '.join(jobs)}  ·  "
-                       f"{budget_display}  ·  {a['employees']} people")
+                       f"{budget_display}  ·  {a['employees']} people{free_note}")
             # Let visitors verify or revise their budget without restarting Vee.
             with st.expander("Review or change your monthly budget"):
                 budget_entry = st.number_input(
@@ -939,6 +1040,7 @@ def render_vee_chat(
                 st.write("- Review the catalog for tools addressing the secondary task; "
                          "don't treat those tools as replacements for the main requirement.")
                 st.write("- Check the provider directly for required features, total cost, and compliance before buying.")
+                st.write("- Consider free scheduling templates or existing calendar tools for a temporary workaround; these are not verified AI recommendations.")
                 st.caption("You can change your budget above, or start a new conversation to change the main task.")
             else:
                 for index, item in enumerate(ranked[:3], start=1):
@@ -972,12 +1074,23 @@ def render_vee_chat(
                 st.session_state.pop("vee_inline_followup", None)
                 a["budget"] = _budget_label(new_amount, budget_cap)
                 summary = ("unlimited" if new_amount == float("inf") else f"${new_amount:,.2f}/month")
+                preference = _free_preference(reply)
+                if preference is not None:
+                    a["prefer_free"] = preference
+                note = " I'll prioritize verified free options where available." if a.get("prefer_free") else ""
                 answer = (f"I've updated your monthly budget to {summary}. "
-                          "The recommendation list and ROI estimates will refresh using that limit.")
+                          "The recommendation list and ROI estimates will refresh using that limit." + note)
             else:
                 answer = "What should I set your monthly budget to? For example, $10 or free only."
         else:
-            answer = _followup(state, reply, ranked, tools)
+            preference = _free_preference(reply)
+            if preference is not None:
+                a["prefer_free"] = preference
+                answer = ("I'll prioritize free options where a verified plan fits your needs, "
+                          "without changing your monthly spending limit." if preference else
+                          "Understood. I won't prioritize free plans over other matches.")
+            else:
+                answer = _followup(state, reply, ranked, tools)
         state["messages"].append({"role": "assistant", "content": answer})
         st.rerun()
         return
@@ -1047,13 +1160,10 @@ def render_vee_chat(
     if error:
         response = error
     else:
-        index = FIELDS.index(stage)
-        if index == len(FIELDS) - 1:
-            state["stage"] = "done"
-            response = _done_message(state)
-        else:
-            next_stage = FIELDS[index + 1]
-            state["stage"] = next_stage
-            response = _speak(state, next_stage)
+        # Save details given early, then skip questions we already know.
+        _capture_early_answers(a, reply, comfort_options)
+        next_stage = _next_unanswered(stage, a)
+        state["stage"] = next_stage
+        response = _done_message(state) if next_stage == "done" else _speak(state, next_stage)
     state["messages"].append({"role": "assistant", "content": response})
     st.rerun()
