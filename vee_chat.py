@@ -1037,7 +1037,7 @@ def _compare_followup_actions(state, ranked):
 def render_vee_chat(
     *, tools, business_types, budget_cap, comfort_options,
     score_tools, ai_job_from_text, job_from_text, vee_avatar, evaluate_plan_cost=None,
-    research_tools=None,
+    research_tools=None, business_tools=None, show_tool_result=None,
 ):
     """Main guided AI chat, compatible with ViperVision's scoring callbacks."""
     # Streamlit keeps session_state across code deployments. Old intake versions

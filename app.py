@@ -547,6 +547,8 @@ def home_page():
             # Yellow ombre box around the Chat with Vee area
             with st.container(key="vee_chat_box"):
                 render_vee_chat(
+                    business_tools=business_tools,
+                    show_tool_result=show_tool_result,
                 tools=tools,
                 business_types=BUSINESS_TYPES,
                 budget_cap=BUDGET_CAP,
