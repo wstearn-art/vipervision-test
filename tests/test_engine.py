@@ -54,6 +54,38 @@ class EngineTests(unittest.TestCase):
                 self.assertEqual(decision["status"], "confirmed")
                 self.assertLessEqual(decision["cost"], 100)
 
+    def test_shared_evaluation_and_comparison_follow_profile_revision(self):
+        import pandas as pd
+        import vee_chat as chat
+        from unittest.mock import patch
+        from recommendation_engine import evaluate_catalog
+        tools = pd.read_csv(ROOT / "ai_tools.csv")
+        plans = load_plan_catalog(ROOT / "tool_plans.csv")
+        state = chat._state()
+        chat._ensure_profile(state["answers"])
+        options = (["Coffee Shop"], ["Keep it simple", "I can learn a bit"], {"Under $100": 100})
+        with patch.object(chat.st, "session_state", {}):
+            chat._apply_profile_actions(state, {"base_revision": 0, "clarification": None, "actions": [
+                {"op": "add", "description": "Create social content", "capabilities": ["social_content_creation"], "importance": "essential"},
+                {"op": "set", "field": "budget_amount", "value": 100}]}, "Initial profile", *options)
+            evaluate = lambda data, req: evaluate_catalog(data, req, plans)
+            first = chat._current_evaluation(state, tools, None, evaluate_catalog=evaluate)
+            self.assertTrue(first["ranked"])
+            self.assertIs(first, chat._current_evaluation(state, tools, None, evaluate_catalog=evaluate))
+            comparison = chat._catalog_comparison(first["ranked"])
+            for item in first["ranked"][:3]:
+                self.assertIn(item["tool"]["tool_name"], comparison)
+                self.assertIn(item["fit_classification"], comparison)
+                self.assertEqual(item["pricing"]["status"], "confirmed")
+            chat._apply_profile_actions(state, {"base_revision": 1, "clarification": None,
+                "actions": [{"op": "set", "field": "budget_amount", "value": 0}]}, "Free only", *options)
+            second = chat._current_evaluation(state, tools, None, evaluate_catalog=evaluate)
+            self.assertEqual(second["revision"], 2)
+            self.assertIsNot(first, second)
+            # The catalog's free social plans have unverified usage capacity.
+            self.assertEqual(second["ranked"], [])
+            self.assertTrue(second["leads"])
+
 
 if __name__ == "__main__":
     unittest.main()

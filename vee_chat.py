@@ -1,8 +1,8 @@
 """ViperVision Vee: AI-led business conversation with catalog-grounded results.
 
 
-OpenRouter creates conversational replies; Python validates inputs and ranks only
-verified catalog entries. If AI is unavailable, the intake still works.
+OpenRouter proposes customer intent; Python validates profile changes and ranks
+only verified catalog entries. Unavailable interpretations preserve saved state.
 """
 
 import json
@@ -11,7 +11,8 @@ import re
 
 import requests
 import streamlit as st
-from recommendation_engine import required_capabilities, split_requirements
+from customer_profile import (InvalidProposal, apply_proposal, ensure_profile,
+                              interpretation_prompt, parse_proposal)
 
 logger = logging.getLogger("vipervision.ai")
 logger.setLevel(logging.INFO)
@@ -33,9 +34,6 @@ QUESTIONS = {
     "comfort": "Would you rather use something simple, or are you comfortable learning new software?",
     "employees": "How many people work in your business, including you?",
 }
-NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-           "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-           "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
 
 
 def _record_ai_status(status, *, http_status=None, usage=None):
@@ -125,115 +123,8 @@ def _call_ai(system, user_messages, *, max_tokens=180):
     return None
 
 
-def _number_of_people(message):
-    """Read a headcount without confusing a price with a person."""
-    # Prefer a number attached to people, even if the sentence contains $10.
-    count = _early_employee_count(message)
-    if count is not None:
-        return count
-    text = str(message).strip().casefold()
-    # Bare answers are valid when Vee is asking about employees.
-    number = re.fullmatch(r"(?:there (?:are|is)\s+)?(\d{1,5}|" + "|".join(NUMBERS) + r")(?:\s+(?:people|employees?|staff|workers))?[.! ]*", text)
-    if number:
-        token = number.group(1)
-        value = int(token) if token.isdigit() else NUMBERS.get(token)
-        return value if value and 1 <= value <= 100000 else None
-    return None
-
-
-def _free_preference(message):
-    """Read a request to favor free options without changing the spending cap."""
-    text = str(message).casefold()
-    if re.search(r"\b(?:don't|do not|not)\s+(?:prefer|want|need)\s+free\b", text):
-        return False
-    if re.search(r"\b(?:prefer|preferably|ideally|rather|favor|favour)\b.{0,35}\bfree\b", text):
-        return True
-    if re.search(r"\bfree\s+(?:preferred|if possible|first|options?)\b", text):
-        return True
-    return None
-
-
-def _early_employee_count(message):
-    """Only capture numbers connected to a person's team size."""
-    text = str(message).casefold()
-    quantity = r"(\d{1,5}|" + "|".join(NUMBERS) + r")"
-    patterns = (
-        r"\b(?:team of|staff of|crew of|have|with|employ|employing|there (?:are|is))\s+" + quantity + r"\s+(?:employees?|people|staff|workers|team members?)\b",
-        r"\b" + quantity + r"\s+(?:employees?|staff members?|workers|people(?:\s+(?:total|on (?:my|our|the) team))?|team members?)\b",
-        r"\b(?:my|our)\s+team\s+(?:has|is|consists of)\s+" + quantity + r"\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            token = match.group(1)
-            value = int(token) if token.isdigit() else NUMBERS.get(token)
-            if value and 1 <= value <= 100000:
-                return value
-    if re.search(r"\b(?:solo owner|one.person business|just me|only me|myself|i(?:'m| am) the only employee|only employee|one person total)\b", text):
-        return 1
-    return None
-
-
-def _early_comfort(message, options):
-    """Only store a tech preference when the wording is explicit."""
-    text = str(message).casefold()
-    if re.search(r"\b(?:not comfortable|uncomfortable|struggle)\s+(?:with\s+)?(?:learning|using|new)\s*(?:software|tech|technology|tools)?\b", text):
-        return _comfort("beginner", options)
-    if re.search(r"\b(?:comfortable|confident|happy|willing|open to)\s+(?:with\s+)?(?:learning|using|trying)\s+(?:new\s+)?(?:software|technology|tools|tech)\b|\bcomfortable with (?:software|tech|technology)\b", text):
-        return _comfort("comfortable learning software", options)
-    if re.search(r"\b(?:tech beginner|beginner technical experience|beginner tech experience|very limited tech experience|not (?:very )?tech savvy|little technical experience|prefer simple software|i(?:'m| am) (?:a |an )?beginner|new to (?:tech|technology|software)|not (?:great|good) with (?:tech|technology|software))\b", text):
-        return _comfort("beginner", options)
-    return None
-
-
-def _explicit_business(message):
-    """Recognize a business introduction without guessing from unrelated words."""
-    text = str(message).strip()
-    match = re.search(
-        r"\b(?:i\s+(?:run|own|operate|manage|have)|my business is|we run|we own)\s+"
-        r"(?:a|an|the|small)\s+(.+?)(?=[,.;!?]|\s+(?:with|and (?:we|i)|where|that|we're|i'm)\b|$)",
-        text, re.I)
-    return match.group(1).strip()[:100] if match else None
-
-
-def _explicit_challenge(message):
-    """Keep an explicitly described problem for the challenge classifier."""
-    text = str(message).strip()
-    match = re.search(
-        r"\b(?:we(?:'re| are) struggling with|i(?:'m| am) struggling with|"
-        r"our (?:biggest |main )?(?:challenge|problem) is|"
-        r"the (?:biggest |main )?(?:challenge|problem) is|"
-        r"we (?:need help with|have trouble(?: with)?)|i need help with)\s+"
-        r"(.+?)(?=[.;!?]|\s+and\s+(?:i(?:'m| am)|my budget|we have)|$)",
-        text, re.I)
-    return match.group(1).strip()[:350] if match else None
-
-
-def _explicit_goal(message):
-    """Only skip the goal question when an outcome is clearly stated."""
-    match = re.search(
-        r"\b(?:my goal is|our goal is|the outcome i want is|"
-        r"what i want to achieve is|our priority is)\s+(.+?)(?=[.;!?]|$)",
-        str(message), re.I)
-    return match.group(1).strip()[:300] if match else None
-
-
 def _ensure_profile(answers):
-    """Migrate existing sessions without changing their conversation."""
-    if "essential_capabilities" in answers:
-        return
-    required, optional = split_requirements(None, answers.get("challenge", ""), answers.get("goal", ""))
-    answers["essential_capabilities"] = required
-    answers["optional_capabilities"] = optional
-    answers["unresolved_requirements"] = []
-    answers["evidence"] = []
-    answers["revision"] = 0
-    text = " ".join(str(answers.get(k, "")) for k in
-                    ("business", "challenge", "goal", "raw_budget", "raw_comfort", "raw_employees"))
-    answers.update(_purchasing_details(text))
-    if answers.get("challenge") and not required:
-        answers["unresolved_requirements"] = [answers["challenge"]]
-    answers["unresolved_requirements"] += _hard_requirements(text)
+    return ensure_profile(answers)
 
 
 def _profile_context(answers):
@@ -241,232 +132,39 @@ def _profile_context(answers):
             if k not in {"evidence", "raw_budget", "raw_comfort", "raw_employees"}}
 
 
-def _profile_changed(state, before, message):
-    answers = state["answers"]
-    current = {k: v for k, v in answers.items() if k not in {"revision", "evidence"}}
-    if current == before:
-        return False
-    answers["revision"] += 1
-    answers["evidence"].append({"revision": answers["revision"], "statement": message})
-    state.pop("evaluation", None)
-    for key in ("vee_inline_followup", "vee_roi_candidates", "vee_research_leads", "roi_tool_choice"):
-        st.session_state.pop(key, None)
-    return True
-
-
-def _conversation_control(message):
-    """Keep questions and conversation repairs out of questionnaire answers."""
-    text = message.strip().replace("’", "'")
-    directive = re.search(r"\b(?:i|we)\s+(?:(?:also|only|now|really)\s+)*(?:need|want|require|choose|select)\b|\b(?:add|remove|cancel|replace|keep|originally asked for)\b", text, re.I)
-    question = "?" in text or re.match(r"^(?:(?:can|could|may|should|would)\s+(?:i|we|you)\b|(?:do|does|did|is|are)\s+|(?:what|why|how)\s+(?:is|are|do|does|can|should|would|about)\b)", text, re.I)
-    if question:
-        if re.search(r"\b(?:can|could) you show me\b", text, re.I):
-            return None
-        return True, "You can include multiple needs. Which needs would you like me to use?"
-    repair = re.search(r"\b(?:you|vee)\b.{0,55}\b(?:assumed|guessed|misunderstood|misread|picked|chose)\b|\b(?:haven't|have not|didn't|did not|not yet)\s+(?:picked|chosen|selected|decided|answered)\b|\b(?:that's|that is)\s+(?:wrong|not what)\b", text, re.I)
-    if (repair and not directive) or re.fullmatch(r"(?:ok|okay|thanks|thank you|got it|yes|no)[.! ]*", text, re.I):
-        return False, "I haven't selected any new needs. Please tell me which needs you want to keep."
-    return None
-
-
-def _requirement_identity(text):
-    """Use shared capability IDs, then normalized wording for unknown needs."""
-    caps = set(required_capabilities(None, text))
-    if caps:
-        return caps
-    normalized = re.sub(r"\b(?:i|we|also|only|need|want|require|help|with|my|our|the|please|for|remove|cancel|keep|add)\b", " ", text.casefold())
-    return {"unresolved:" + " ".join(re.findall(r"[a-z0-9]+", normalized))}
+def _apply_profile_actions(state, proposal, message, business_types, comfort_options, budget_cap):
+    updated, changed, clarification = apply_proposal(
+        state["answers"], proposal, comfort_options=comfort_options,
+        business_types=business_types, budget_cap=budget_cap, message=message)
+    if changed:
+        # Keep the shared dictionary identity used by the current Streamlit render.
+        state["answers"].clear()
+        state["answers"].update(updated)
+        state.pop("evaluation", None)
+        for key in ("vee_inline_followup", "vee_roi_candidates", "vee_research_leads", "roi_tool_choice"):
+            st.session_state.pop(key, None)
+    return {"changed": changed, "budget_edit": any(a.get("field") == "budget_amount"
+            for a in proposal["actions"]), "ambiguous_budget": False, "clarification": clarification}
 
 
 def _update_profile(state, message, business_types, comfort_options, budget_cap,
-                    ai_job_from_text, job_from_text):
-    """Apply every change in one turn to the existing authoritative answers."""
-    a = state["answers"]
-    _ensure_profile(a)
-    before = {k: v for k, v in a.items() if k not in {"revision", "evidence"}}
-    stage = state["stage"]
-    text = message.strip().replace("’", "'")
-    control = _conversation_control(text)
-    if control:
+                    ai_job_from_text=None, job_from_text=None):
+    """Interpret once, then apply validated actions without reparsing language."""
+    _ensure_profile(state["answers"])
+    system = interpretation_prompt(state["answers"], state["stage"], business_types, comfort_options)
+    messages = list(state["messages"][-8:])
+    if not messages or messages[-1] != {"role": "user", "content": message}:
+        messages.append({"role": "user", "content": message})
+    response = _call_ai(system, messages, max_tokens=1800)
+    try:
+        proposal = parse_proposal(response)
+        result = _apply_profile_actions(state, proposal, message, business_types, comfort_options, budget_cap)
+        state["classification_source"] = "OpenRouter"
+        return result
+    except InvalidProposal:
+        logger.info("Vee interpretation was unavailable or invalid; profile preserved")
         return {"changed": False, "budget_edit": False, "ambiguous_budget": False,
-                "clarification": control[1] if stage != "done" or not control[0] else None}
-    clarification = None
-    budget_edit = False
-    ambiguous = False
-    # Scope intent to clauses so a simultaneous needs edit cannot swallow a budget edit.
-    clauses = re.split(r"[;!]|(?<!\d)\.(?!\d)|,?\s+and\s+(?=(?:i|we|change|set|my|our|cancel|remove|drop|forget|replace|add)\b)", text, flags=re.I)
-    for clause in clauses:
-        explicit = _budget_update_intent(clause.strip())
-        early = re.search(r"\b(?:my|our)\s+(?:maximum |monthly )?budget\s+is\b|\b(?:i|we)\s+(?:can|could|would)\s+(?:spend|afford)\b|\bi have\s+\$.*to spend\b", clause, re.I)
-        budget_edit = budget_edit or explicit
-        if explicit or (early and "?" not in clause) or (stage == "budget" and len(clauses) == 1):
-            ambiguous = _budget_is_ambiguous(text)
-            amount = _monthly_budget(clause) if not ambiguous else None
-            if amount is not None and not re.search(r"\b(?:does|cost|per seat|do not change)\b", clause, re.I):
-                a.update(budget_amount=amount, budget=_budget_label(amount, budget_cap), raw_budget=message)
-    free = _free_preference(text)
-    if free is not None:
-        a["prefer_free"] = free
-    count = _early_employee_count(text) or (_number_of_people(text) if stage == "employees" else None)
-    if count is not None:
-        a.update(employees=count, raw_employees=message)
-    comfort = _early_comfort(text, comfort_options)
-    if comfort is None and stage == "comfort" and not budget_edit:
-        comfort = _comfort(text, comfort_options)
-    if comfort is not None:
-        a.update(comfort=comfort, raw_comfort=message)
-    business = _explicit_business(text)
-    if business is None and stage == "business" and not budget_edit and not re.search(r"\b(?:i need|remove|forget|add)\b", text, re.I):
-        business = text
-    if business:
-        a.update(business=business, catalog_business=_business_type(business, business_types))
-    name = _optional_name(text)
-    if name:
-        a["name"] = name
-    a.update(_purchasing_details(text))
-
-    intent = re.search(r"\b(?:i|we)\s+(?:(?:also|actually|now|really|only)\s+)*(?:need|want|require|choose|select)\b|\b(?:add|remove|drop|forget|replace|instead|i meant|cancel|not|originally asked for|show me|i mean|clarify|specifically|prefer|optional|no longer|don't need|do not need)\b", text, re.I)
-    problem_turn = stage in {"challenge", "goal"} and not _is_greeting(text) and (not budget_edit or bool(required_capabilities(None, text)))
-    problem_turn = problem_turn or bool(_explicit_challenge(text)) or bool(_explicit_goal(text))
-    if (problem_turn or intent) and ("?" not in text or re.search(r"\b(?:can|could) you show me\b", text, re.I)):
-        required = set(a["essential_capabilities"])
-        optional = set(a["optional_capabilities"])
-        unresolved = list(a["unresolved_requirements"])
-        exclusive = bool(re.search(r"\b(?:i|we)\s+(?:now\s+)?only\s+(?:need|want|require)\b|\b(?:i|we)\s+(?:need|want|require)\s+only\b", text, re.I))
-        replacing = exclusive or bool(re.search(r"\bforget scheduling[.;]|\b(?:forget|replace)\s+(?:the |my |our )?(?:problem|everything)\b|\b(?:instead(?: i)? need|my (?:actual|real) problem)\b", text, re.I))
-        if replacing:
-            required.clear()
-            optional.clear()
-            unresolved.clear()
-        edit_text = re.sub(r"\breplace ([^.;!?]+?) with ([^.;!?]+)", r"remove \1; I need \2", text, flags=re.I)
-        edit_text = re.sub(r"\binstead of ([^,.;!?]+),\s*((?:i|we)\s+(?:need|want|require)\b[^.;!?]+)", r"remove \1; \2", edit_text, flags=re.I)
-        edit_text = re.sub(r"([^.;!?]+?)\s+instead of\s+([^.;!?]+)", r"remove \2; \1", edit_text, flags=re.I)
-        edit_text = re.sub(r"\bnot (?:only|just)\b", "", edit_text, flags=re.I)
-        edit_text = re.sub(r"\bbut also\b", "and", edit_text, flags=re.I)
-        if re.search(r"\bi meant\b", text, re.I):
-            new_caps = set(required_capabilities(None, text))
-            schedule_family = {"crew_dispatch", "employee_scheduling", "shift_swap_management", "appointment_booking", "personal_task_scheduling"}
-            if new_caps & schedule_family:
-                required.difference_update(schedule_family - new_caps)
-                optional.difference_update(schedule_family - new_caps)
-        # Preserve distinct needs; negation applies only to its own clause.
-        pieces = re.split(r"([;!?]|,(?!\d)|(?<!\d)\.(?!\d)|\b(?:but|and|plus|as well as)\b)", edit_text, flags=re.I)
-        changed_needs = False
-        context_caps = required_capabilities(None, text)
-        removing = False
-        concrete_refinement = False
-        selecting = (stage == "goal" or bool(re.search(r"\b(?:choose|select)\b", text, re.I))) and not re.search(r"\b(?:also|in addition|as well as)\b", text, re.I)
-        if selecting and required_capabilities(None, text):
-            # Keep mandatory restrictions when replacing pending suggestions.
-            unresolved = [u for u in unresolved if _hard_requirements(u)]
-        clarifying = bool(re.search(r"\bi mean(?:t)?\b|\bclarif\w*\b|\bspecifically\b", text, re.I))
-        if clarifying and required_capabilities(None, text) and unresolved:
-            if len(unresolved) == 1:
-                unresolved.clear()
-            else:
-                clarification = "Which saved need are you clarifying? " + "; ".join(unresolved)
-        for piece in pieces:
-            piece = piece.strip(" ,")
-            if _conversation_control(piece):
-                continue
-            if piece.casefold() in {"but", ";", ".", "!", "?"}:
-                removing = False
-                continue
-            if not piece or piece.casefold() in {"and", "plus", "as well as"}:
-                continue
-            if not piece or re.search(r"\b(?:budget|per seat|tech|software|employees? total|beginner|comfortable|spend|per month|monthly)\b", piece, re.I) and not required_capabilities(None, piece):
-                continue
-            if re.search(r"\b(?:do not|don't|never)\s+(?:cancel|remove|drop|forget|replace|add)\b", piece, re.I):
-                removing = False
-                continue
-            removal = r"\b(?:cancel (?:the )?need for|remove|drop|forget|no longer (?:need|want|require)|don't (?:need|want|require)|do not (?:need|want|require)|not)\b"
-            suffix = r"\s+(?:alone\s+)?(?:will not solve|is not needed|isn't needed|not required|is not required|isn't required).*"
-            explicit_remove = bool(re.search(removal, piece, re.I) or re.search(suffix, piece, re.I))
-            explicit_add = bool(re.search(r"\b(?:i|we)\s+(?:(?:also|only|now)\s+)?(?:need|want|require)\b|\b(?:add|keep)\b", piece, re.I))
-            if explicit_remove:
-                removing = True
-            elif explicit_add:
-                removing = False
-            negative = removing
-            parse_text = re.sub(suffix, "", piece, flags=re.I)
-            parse_text = re.sub(removal, "", parse_text, flags=re.I)
-            if negative:
-                hard_removed = _hard_requirements(parse_text)
-                target_ids = _requirement_identity(parse_text)
-                matching = [u for u in unresolved if _requirement_identity(u) <= target_ids or u in hard_removed]
-                if not matching and not (target_ids & (required | optional)):
-                    if any(identity.startswith("unresolved:") for identity in target_ids):
-                        saved = unresolved + [cap.replace("_", " ") for cap in sorted(required | optional)]
-                        clarification = "Which saved need should I remove? " + "; ".join(saved)
-                    else:
-                        clarification = "That requirement isn't currently saved. I haven't removed any other needs."
-                unresolved = [u for u in unresolved if u not in matching]
-            caps, prefs = split_requirements(None, parse_text)
-            if not negative and caps:
-                target_ids = set(caps + prefs)
-                unresolved = [u for u in unresolved if not (_requirement_identity(u) <= target_ids)]
-            if re.fullmatch(r"(?:advanced )?forecast(?:ing)?", parse_text, re.I):
-                caps = [c for c in context_caps if "forecast" in c]
-            if re.search(r"\bswaps?\b", parse_text, re.I) and "employee_scheduling" in required:
-                caps = sorted(set(caps) | {"shift_swap_management"})
-            if negative and re.search(r"\bscheduling\b", piece, re.I) and not caps:
-                caps = [c for c in required | optional if c in {"employee_scheduling", "shift_swap_management", "crew_dispatch", "appointment_booking"}]
-            if caps and not negative:
-                extra = re.search(r"\b(?:with|including)\s+(.+)", parse_text, re.I)
-                if extra and not required_capabilities(None, extra.group(1)) and _early_employee_count(extra.group(1)) is None:
-                    # Keep an unrecognized companion requirement visible.
-                    if extra.group(1) not in unresolved:
-                        unresolved.append(extra.group(1))
-            if caps or prefs:
-                changed_needs = True
-                if negative:
-                    required.difference_update(caps + prefs)
-                    optional.difference_update(caps + prefs)
-                else:
-                    concrete_refinement = concrete_refinement or bool(set(caps) - {"general_business_assistance"})
-                    required.update(caps)
-                    optional.update(prefs)
-                    required.difference_update(prefs)
-                # A concrete clarification resolves the preceding vague intake answer.
-                if unresolved == [a.get("challenge")]:
-                    unresolved.clear()
-            elif (re.search(r"\b(?:need|require|problem|struggling|trouble|help with)\b", piece, re.I)
-                  or (intent and not re.search(r"\b(?:budget|employees?|people|beginner|comfortable|business|run|own|spend|free|name|actually)\b", piece, re.I))) and not negative:
-                if piece not in unresolved:
-                    unresolved.append(piece)
-        if (stage == "goal" and concrete_refinement
-                and re.search(r"\bdaily operations\b", a.get("challenge", ""), re.I)
-                and not re.search(r"\b(?:also|in addition|as well as|general business (?:help|assistance))\b", text, re.I)):
-            required.discard("general_business_assistance")
-        if problem_turn or changed_needs or replacing or unresolved != a["unresolved_requirements"]:
-            initial = "challenge" not in a
-            if initial:
-                a["challenge"] = _explicit_challenge(text) or text
-                category = ai_job_from_text(a["challenge"])
-                a["job"] = category or job_from_text(a["challenge"])
-                state["classification_source"] = "OpenRouter" if category else "Keyword fallback"
-            elif replacing:
-                a["challenge"] = text
-            explicit_goal = _explicit_goal(text)
-            if explicit_goal:
-                a["goal"] = explicit_goal
-            if stage == "goal" or (stage == "challenge" and not _needs_goal_clarification(a["challenge"])) or stage == "done":
-                a["goal"] = text if stage != "challenge" else a["challenge"]
-            if stage == "challenge" and "goal" not in a:
-                state["goal_question"] = _goal_question(state)
-            for issue in _hard_requirements(text):
-                if issue not in unresolved:
-                    unresolved.append(issue)
-            a["essential_capabilities"] = sorted(required)
-            a["optional_capabilities"] = sorted(optional - required)
-            a["unresolved_requirements"] = unresolved
-            if not initial and stage == "done":
-                active = ", ".join(c.replace("_", " ") for c in sorted(required))
-                if unresolved:
-                    active += "; needs clarification: " + "; ".join(unresolved)
-                a["challenge"] = a["goal"] = active
-    changed = _profile_changed(state, before, message)
-    return {"changed": changed, "budget_edit": budget_edit, "ambiguous_budget": ambiguous, "clarification": clarification}
+                "clarification": "I couldn't reliably interpret that update. Please clarify the need or change you'd like me to save."}
 
 
 def _next_unanswered(current, answers):
@@ -478,198 +176,16 @@ def _next_unanswered(current, answers):
     return "done"
 
 
-def _monthly_budget(message):
-    """Read a monthly ceiling from the budget answer or a confirmed budget edit.
-
-    Do not treat employee counts, usage quantities, or product prices as budgets.
-    """
-    text = str(message).lower().replace(",", "").strip()
-    if re.search(r"\b(any price|any budget|unlimited|no (?:spending |budget )?limit|whatever it costs|no maximum|flexible budget|budget is flexible)\b", text):
-        return float("inf")
-    # A named budget edit is more reliable than other dollar amounts in the reply.
-    direct_edit = re.search(
-        r"\b(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
-        r"(?:my|our|the)\s+(?:monthly\s+)?(?:maximum|maximum budget|max|limit|ceiling)\s+"
-        r"(?:budget\s+)?(?:to|at)\s*\$?\s*(\d+(?:\.\d+)?)\b", text)
-    if direct_edit:
-        return float(direct_edit.group(1))
-    # Explicit old -> new corrections should always use the destination amount.
-    transition = re.search(r"\bfrom\s+\$?\s*\d+(?:\.\d+)?\s+to\s+\$?\s*(\d+(?:\.\d+)?)\b", text)
-    if transition:
-        return float(transition.group(1))
-    # If a corrected budget explicitly replaces an earlier one, use the new amount.
-    correction = re.search(r"\b(?:budget|limit|maximum|max|ceiling)\s+(?:is\s+)?\$?\s*(\d+(?:\.\d+)?)\s+instead\s+of\s+\$?\s*\d", text)
-    if correction:
-        return float(correction.group(1))
-    # Explicit monthly maximum takes precedence over annual prices and free preferences.
-    month_matches = list(re.finditer(
-        r"\$\s*(\d+(?:\.\d+)?)\s*(?:/\s*(?:mo|month)|per\s+month|a\s+month|monthly)\b|"
-        r"\b(\d+(?:\.\d+)?)\s*(?:/\s*(?:mo|month)|per\s+month|a\s+month|monthly)\b", text))
-    if month_matches:
-        value = float(month_matches[-1].group(1) or month_matches[-1].group(2))
-        return value if value <= 1000000 else None
-    # Catch a natural limit statement such as "My maximum budget is $10/month".
-    maximum = re.search(
-        r"\b(?:my|our|the)\s+(?:(?:monthly|total)\s+)?"
-        r"(?:maximum|max|limit|ceiling)\s+(?:monthly\s+)?(?:budget|spend|spending)?\s*"
-        r"(?:is|of|to|at|:)\s*\$?\s*(\d+(?:\.\d+)?)\b", text)
-    if maximum:
-        return float(maximum.group(1))
-    # Look for a number directly tied to the owner's budget, not another figure.
-    budget_amount = re.search(
-        r"\b(?:my\s+)?(?:monthly\s+)?(?:budget|limit|maximum|max|ceiling|spend|spending|afford)\s*"
-        r"(?:is|of|to|at|would\s+be|can\s+be|up\s+to|around|about|:)?\s*\$?\s*(\d+(?:\.\d+)?)\b", text)
-    if budget_amount and not re.match(r"\s*(?:/\s*(?:yr|year)|per\s+year|annually)", text[budget_amount.end():]):
-        value = float(budget_amount.group(1))
-        return value if value <= 1000000 else None
-    # In a dedicated budget question, currency is a natural answer. Ignore annual amounts.
-    dollars = [m for m in re.finditer(r"\$\s*(\d+(?:\.\d+)?)\b(?!\s*(?:/\s*(?:yr|year)|per\s+year|annually))", text)
-               if not re.match(r"\s*(?:/\s*(?:yr|year)|per\s+year|annually)", text[m.end():])]
-    if dollars:
-        value = float(dollars[-1].group(1))
-        return value if value <= 1000000 else None
-    # A simple numeric reply is valid; a number within unrelated prose is not.
-    bare = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:dollars?|bucks?)?\s*", text)
-    if bare:
-        return float(bare.group(1))
-    if re.fullmatch(r"(?:free(?: only)?|nothing|zero|no budget|\$0)(?:[.! ]*)", text) or re.search(r"\b(?:free only|my budget is zero|my budget is free)\b", text):
-        return 0.0
-    return None
-
-
-def _budget_is_ambiguous(message):
-    """Ask rather than choosing between contradictory total and per-item ceilings."""
-    text = str(message).lower().replace(",", "")
-    if re.search(r"\bfrom\s+\$?\s*\d+(?:\.\d+)?\s+to\s+\$?\s*\d", text):
-        return False
-    if "instead of" in text:
-        return False
-    values = [float(m.group(1)) for m in re.finditer(r"\$\s*(\d+(?:\.\d+)?)", text)]
-    if len(set(values)) <= 1:
-        return False
-    # A product price is not a competing budget ceiling.
-    if re.search(r"\b(?:tool|product|plan|subscription|vendor)\s+(?:costs?|is|priced?)\s*(?:at\s*)?\$", text):
-        return False
-    # Equivalent annual and monthly figures are not a conflict.
-    if len(values) == 2 and re.search(r"\b(?:per\s+year|/year|/yr|annually)\b", text) and re.search(r"\b(?:per\s+month|/month|/mo|monthly)\b", text):
-        if abs(max(values)/12 - min(values)) < .01:
-            return False
-    return True
-
-
-def _budget_update_intent(message):
-    """Only explicit owner-directed budget edits may change session state."""
-    text = str(message).strip().lower()
-    if "?" in text or re.search(r"\b(?:don['’]?t|do not|never|without)\s+(?:want(?:ing)?\s+to\s+)?(?:change|update|alter|adjust|modify|raise|lower|increase|decrease|set)\b", text):
-        return False
-    if re.search(r"\b(?:keep|leave|remain|stay)\b.{0,35}\b(?:budget|unchanged|same)\b", text):
-        return False
-    # Accept an explicit budget correction after another answered question.
-    if re.search(r"(?:^|[.!;]\s*)(?:(?:please|actually|explicitly|now)\s*[,.:]?\s*)*"
-                 r"(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
-                 r"(?:my|our|the)\s+(?:monthly\s+)?"
-                 r"(?:maximum|maximum budget|max|limit|ceiling)\b", text):
-        return True
-    # Accept explicit corrections to the maximum, not only the word "budget".
-    if re.match(r"^(?:(?:please|actually|explicitly|now)\s*[,.:]?\s*)*"
-                r"(?:change|update|set|lower|raise|adjust|revise|correct)\s+"
-                r"(?:my|our|the)\s+(?:monthly\s+)?"
-                r"(?:maximum|maximum budget|max|limit|ceiling)\b", text):
-        return True
-    # Require an actual instruction, not the word 'budget' somewhere in a cost question.
-    # A stated maximum is a budget update, even without the word "change".
-    if re.match(r"^(?:my|our|the)\s+(?:(?:monthly|total)\s+)?"
-                r"(?:maximum|max|limit|ceiling)\s+(?:monthly\s+)?(?:budget|spend|spending)?\s+(?:is|of|to|at)\b", text):
-        return True
-    return bool(re.search(
-        r"^(?:(?:please|actually|okay|ok|now)\s*[,.:]?\s*)*"
-        r"(?:(?:i(?:'d| would)?\s+like\s+to|i\s+want\s+to|can\s+you|please)\s+)?"
-        r"(?:change|update|correct|revise|set|increase|decrease|raise|lower|adjust)\s+"
-        r"(?:my\s+|the\s+)?(?:monthly\s+)?budget\b|"
-        r"^(?:actually\s+)?(?:my|our|the)\s+(?:monthly\s+)?budget\s+(?:is|should\s+be|will\s+be|has\s+changed\s+to)\b|"
-        r"^(?:actually\s+)?(?:make|set)\s+(?:my\s+|the\s+)?budget\b|"
-        r"^i\s+(?:want|would\s+like)\s+(?:to\s+)?(?:set\s+)?my\s+(?:monthly\s+)?budget\s+to\b", text))
-
-
-def _budget_label(amount, caps):
-    if amount == float("inf"):
-        return max(caps, key=caps.get)
-    if amount == 0:
-        return "Free only" if "Free only" in caps else min(caps, key=caps.get)
-    for label, cap in sorted(caps.items(), key=lambda item: item[1]):
-        if amount <= cap:
-            return label
-    return max(caps, key=caps.get)
-
-
-def _business_type(message, available):
-    lower = message.casefold()
-    for option in available:
-        if option.casefold() in lower:
-            return option
-    if any(term in lower for term in ("landscap", "lawn care", "lawn mowing", "yard maintenance")):
-        return next((o for o in available if "landscap" in o.lower()), None)
-    if "coffee" in lower:
-        return next((o for o in available if "coffee" in o.lower()), None)
-    if any(term in lower for term in ("restaurant", "cafe", "café", "diner", "bistro", "food truck")):
-        return next((o for o in available if "restaurant" in o.lower() or "cafe" in o.lower()), None)
-    return None
-
-
-def _comfort(message, options):
-    lower = message.casefold()
-    # Allow flexible preferences instead of forcing the owner to choose a side.
-    # With the current two-option scoring API, flexible users can handle medium setup.
-    if re.search(r"\b(either|both|no preference|doesn.t matter|any|whatever|open to both)\b", lower):
-        return "I can learn a bit" if "I can learn a bit" in options else options[-1]
-    if any(term in lower for term in ("simple", "easy", "beginner", "not tech", "not comfortable", "little experience", "not good")):
-        return "Keep it simple" if "Keep it simple" in options else options[0]
-    if lower.strip() in ("new", "learning", "learn something new") or any(term in lower for term in ("learn", "comfortable", "tech savvy", "experienced", "intermediate", "flexible", "advanced")):
-        return "I can learn a bit" if "I can learn a bit" in options else options[-1]
-    return None
-
-
-def _is_greeting(message):
-    """Don't record an opening hello as the visitor's name."""
-    return bool(re.fullmatch(r"(?:hi|hello|hey|hiya|good morning|good afternoon|good evening)[!. ]*", message.strip(), re.I))
-
-
-
 def _state():
     return {"version": STATE_VERSION, "stage": "challenge", "answers": {}, "messages": [
         {"role": "assistant", "content": QUESTIONS["challenge"]}
     ], "classification_source": "Not attempted"}
 
 
-def _optional_name(message):
-    """Save a name only when someone offers it; never demand one."""
-    match = re.search(r"\b(?:my name is|you can call me|call me)\s+([A-Za-z][A-Za-z' -]{0,35})", message, re.I)
-    if match:
-        return re.split(r"[,!.?;]|\s+and\s+", match.group(1), maxsplit=1)[0].strip()
-    return None
-
-
-def _needs_goal_clarification(challenge):
-    """Skip follow-ups for a concrete, single task; ask when the need is vague."""
-    text = str(challenge).casefold()
-    concrete = (
-        "missed calls", "answering calls", "answer customer calls", "double booking",
-        "double-booking", "shift swaps", "shift swapping", "employee scheduling",
-        "crew scheduling", "scheduling crews", "shift scheduling", "social media posts",
-        "responding to reviews", "appointment booking", "customer reminders",
-        "labor cost tracking", "inventory tracking", "tracking inventory",
-    )
-    # Multiple distinct problems warrant one question about priorities.
-    multiple = re.search(r"\b(?:both|two problems|multiple issues)\b", text)
-    if multiple or (" and " in text and sum(t in text for t in concrete) > 1):
-        return True
-    return not any(term in text for term in concrete)
-
-
 def _speak(state, next_field, observation=""):
     """Use AI for a context-aware response while retaining a deterministic question."""
     a = state["answers"]
-    prompt = state.get("goal_question", QUESTIONS[next_field]) if next_field == "goal" else QUESTIONS[next_field]
+    prompt = _goal_question(state) if next_field == "goal" else QUESTIONS[next_field]
     system = (
         "You are Vee, a warm, observant small-business consultant with a subtle playful wit. "
         "Sound like a capable person, not a scripted survey. Keep it direct and approachable. "
@@ -840,29 +356,6 @@ def _followup(state, user_message, ranked, tools=None):
     return "I can help compare the recommended options or explain another named catalog tool."
 
 
-def _hard_requirements(text):
-    """Only reject affirmative mandatory offline / BAA requirements."""
-    message = str(text).casefold()
-    issues = []
-    offline = re.search(r"\b(offline(?:[- ]only)?|without internet|no internet|no cloud|on[- ]premises?)\b", message)
-    if offline:
-        prefix = message[max(0, offline.start()-55):offline.start()]
-        suffix = message[offline.end():offline.end()+35]
-        negated = bool(re.search(r"(?:do not|does not|don't|doesn't|dont|not|no longer|never)\s+(?:actually\s+)?(?:need|require|want|have to have)\s*$", prefix)
-                       or re.search(r"\b(?:not required|isn't required|is not necessary|optional)\b", suffix))
-        if not negated:
-            issues.append("offline operation")
-    privacy = re.search(r"\b(signed? baa|baa required|hipaa|patient (?:health|data|records))\b", message)
-    if privacy:
-        prefix = message[max(0, privacy.start()-55):privacy.start()]
-        suffix = message[privacy.end():privacy.end()+30]
-        negated = bool(re.search(r"(?:do not|don't|dont|not|never)\s+(?:actually\s+)?(?:need|require|want)\s+(?:an?\s+)?$", prefix)
-                       or re.search(r"\b(?:not required|not necessary|optional)\b", suffix))
-        if not negated:
-            issues.append("health-data privacy or signed BAA")
-    return issues
-
-
 def _catalog_comparison(ranked):
     """Deterministic comparison of supplied named or recommended catalog tools."""
     if not ranked:
@@ -888,47 +381,6 @@ def _catalog_comparison(ranked):
     return "\n\n".join(chunks)
 
 
-def _purchasing_details(text):
-    """Read explicit quantities without equating employees with paid seats."""
-    lower = text.casefold()
-    req = {}
-    if re.search(r"\b(no annual|without annual|no yearly|month.to.month|monthly billing only|cannot commit to annual|can't commit to annual)\b", lower):
-        req["monthly_billing_only"] = True
-    seat_match = re.search(r"\b(\d+)\s+(?:(?:paid|software|support|manager|admin|agent)\s+)?(?:seats?|software users?|support users?|managers? need(?:ing)? seats?)\b", lower)
-    if not seat_match:
-        seat_match = re.search(r"\b(?:only|just)\s+(\d+)\s+(?:managers?|people|staff|employees|users?)\s+(?:need|use|require)\s+(?:(?:software|paid)\s+)?(?:seats?|access|logins?)\b", lower)
-    if seat_match:
-        req["seats"] = int(seat_match.group(1))
-    location_match = re.search(r"\b(\d+)\s*[- ]\s*locations?\b|\b(one|two|three|four|five)\s*[- ]\s*locations?\b", lower)
-    if location_match:
-        req["locations"] = int(location_match.group(1)) if location_match.group(1) else NUMBERS.get(location_match.group(2))
-    # Usage quantities are selected only when bound to their own units.
-    patterns = (
-        ("outcomes", r"\b(\d+)\s+(?:resolved\s+)?(?:outcomes?|automated\s+(?:answers?|resolutions?))\b"),
-        ("outcomes", r"\b(?:target|aim(?:ing)? for|handle|automate|resolve)\s+(\d+)\s+(?:customer\s+)?(?:answers?|questions?|inquiries?)\b"),
-        ("callers", r"\b(\d+)\s+(?:unique\s+)?(?:callers?|customers?)\b"),
-        ("conversations", r"\b(\d+)\s+(?:ai\s+)?conversations?\b"),
-        ("conversations", r"\b(\d+)\s+(?:customer\s+)?calls?\s*(?:or\s+texts?)?\s+per\s+month\b"),
-        ("measurements", r"\b(\d+)\s+(?:property\s+)?measurements?\s+per\s+month\b"),
-        ("ai_operations", r"\b(\d+)\s+ai\s+(?:uses|operations|generations?)\s+per\s+month\b"),
-        ("posts_per_channel", r"\b(\d+)\s+posts?\s+per\s+channel\b"),
-        ("property_acre_credits", r"\b(\d+)\s+(?:property[- ]acre\s+)?credits?\b"),
-        ("drafts", r"\b(\d+)\s+(?:ai[- ]assisted\s+)?(?:review\s+)?drafts?\b"),
-    )
-    for unit, pattern in patterns:
-        matches = list(re.finditer(pattern, lower))
-        if matches:
-            # Prefer the final explicit quantity for the same unit.
-            req["monthly_usage"] = int(matches[-1].group(1))
-            req["usage_unit"] = unit
-            break
-    # A stated 'Instagram and Facebook' requirement is two social channels.
-    channels = sum(1 for n in ("instagram", "facebook", "tiktok", "linkedin", "pinterest", "youtube") if re.search(r"\b" + n + r"\b", lower))
-    if channels:
-        req["channels"] = channels
-    return req
-
-
 def _requirements_from_answers(answers):
     """Return the saved profile in the pricing API's compatible shape."""
     _ensure_profile(answers)
@@ -938,6 +390,8 @@ def _requirements_from_answers(answers):
 def _current_evaluation(state, tools, score_tools, research_tools=None, evaluate_catalog=None):
     """All displays share this revision's plan decisions."""
     a = state["answers"]
+    if _ensure_profile(a):
+        state.pop("evaluation", None)
     req = _requirements_from_answers(a)
     cached = state.get("evaluation")
     if cached is not None and cached["revision"] == a["revision"]:
@@ -1127,7 +581,9 @@ def render_vee_chat(
         state = _state()
         st.session_state.vee_guided = state
     a = state["answers"]
-    _ensure_profile(a)
+    if _ensure_profile(a):
+        state.pop("evaluation", None)
+        st.session_state.pop("vee_inline_followup", None)
     st.session_state["vee_catalog_data"] = tools
     _style_vee()
     st.subheader("🐍 Chat with Vee")
@@ -1194,8 +650,10 @@ def render_vee_chat(
                     key=f"vee_budget_edit_{a['budget_amount']}",
                 )
                 if st.button("Update budget and refresh recommendations", key="vee_budget_apply"):
-                    _update_profile(state, f"Change my budget to ${budget_entry}", business_types,
-                                    comfort_options, budget_cap, ai_job_from_text, job_from_text)
+                    _apply_profile_actions(state, {
+                        "base_revision": a["revision"], "clarification": None,
+                        "actions": [{"op": "set", "field": "budget_amount", "value": budget_entry}],
+                    }, f"Change my budget to ${budget_entry}", business_types, comfort_options, budget_cap)
                     state["messages"].append({"role": "assistant", "content":
                         f"Budget updated to ${budget_entry:,.0f} per month. I've refreshed the recommendations."})
                     st.rerun()
@@ -1206,7 +664,7 @@ def render_vee_chat(
                 else "business intent rules." if state["classification_source"] == "Catalog intent rules"
                 else "keyword matching."))
             if not ranked:
-                hard = _hard_requirements(f"{a.get('challenge', '')} {a.get('goal', '')}")
+                hard = a.get("unresolved_requirements", [])
                 if hard:
                     st.warning("No verified match: our catalog does not establish " +
                                ", ".join(hard) + ". An unknown requirement is not a confirmed fit.")
