@@ -60,7 +60,7 @@ def _project(profile):
 
 
 def ensure_profile(profile):
-    """Migrate once; retain legacy unknown needs for explicit reconciliation."""
+    "Migrate once; retain legacy unknown needs for explicit reconciliation."
     if profile.get("profile_schema") == SCHEMA_VERSION:
         return False
     required, optional = split_requirements(None, profile.get("challenge", ""), profile.get("goal", ""))
