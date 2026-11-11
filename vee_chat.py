@@ -1,4 +1,4 @@
-"""ViperVision Vee: AI-led business conversation with catalog-grounded results.
+"""ViperVision Vee: AI-led business conversation with catalog-grounded result.
 
 
 OpenRouter proposes customer intent; Python validates profile changes and ranks
