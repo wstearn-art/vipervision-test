@@ -21,7 +21,7 @@ DATA_FILE = BASE_DIR / "ai_tools.csv"
 PLAN_FILE = BASE_DIR / "tool_plans.csv"
 VEE_FILE = BASE_DIR / "vee.png"
 EXPECTED_TOOL_COUNT = 22
-PRICE_CHECK_DATE = "Nov 6, 2026"  # replaced by the newest checked_date in the catalog
+PRICE_CHECK_DATE = "Nov 6, 2026"  # replaced by the newest checked_date in the catalog.
 
 REQUIRED_COLUMNS = [
     "tool_name",
