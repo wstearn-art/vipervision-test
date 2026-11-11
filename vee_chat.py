@@ -23,7 +23,7 @@ if not logger.handlers:
 MODEL = "openai/gpt-6-luna"
 FALLBACK_MODEL = "openai/gpt-4o-mini"
 STATE_VERSION = 4
-# Ask about the problem first; collect only details the owner has not shared.
+# Ask about the problem first; collect only details the owner has not shared
 FIELDS = ("challenge", "goal", "budget", "business", "employees", "comfort")
 QUESTIONS = {
     "name": "You can share your name if you like, but it is completely optional.",
