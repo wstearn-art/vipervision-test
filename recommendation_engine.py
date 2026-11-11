@@ -52,14 +52,14 @@ CAPABILITY_PATTERNS = {
     "labor_cost_management": r"\b(?:labou?r (?:costs?|spend|planning)|overtime)\b",
     "advanced_labor_forecasting": r"\b(?:(?:advanced |hourly |predictive )?labou?r forecast\w*|forecast\w* (?:labou?r|staffing))\b",
     "appointment_booking": r"\b(?:appointment bookings?|book appointments?|booking appointments?|double book\w*|appointment conflicts?|booking conflicts?)\b",
-    "customer_appointment_updates": r"\b(?:(?:automated |customer |appointment )?appointment (?:reminders?|updates?)|customer reminders?|customer updates?|communicat\w* with customers|customer communication)\b",
+    "customer_appointment_updates": r"\b(?:(?:automated |customer |appointment )?appointment (?:reminders?|updates?)|customer reminders?|customer updates?)\b",
     "inbound_call_answering": r"\b(?:missed calls?|answer(?:ing)? (?:customer |incoming )?calls?|call answering|phone calls?|incoming calls?)\b",
     "customer_question_answering": r"\b(?:customer (?:questions?|faqs)|answer inquiries|faq)\b",
     "draft_customer_responses": r"\b(?:draft|write|compose)\w* (?:customer )?(?:replies|responses?|messages?)\b",
     "review_response_drafting": r"\b(?:reviews?|review responses?)\b",
     "social_content_creation": r"\b(?:social media|social posts?|social content|instagram|facebook|tiktok|reels?)\b",
     "marketing_content_generation": r"\b(?:marketing|marketing copy|promotional content|campaigns?|advertising)\b",
-    "local_customer_acquisition": r"\b(?:foot traffic|more (?:local )?(?:customers|visitors)|attract\w* (?:more )?(?:local )?customers|customer acquisition|bring in customers|increase traffic)\b",
+    "local_customer_acquisition": r"\b(?:foot traffic|more (?:local )?(?:customers|visitors)|attract\w* (?:(?:more|new|local) )*customers|customer acquisition|bring in customers|increase traffic)\b",
     "accounting_document_processing": r"\b(?:accounting|bookkeeping|receipts?|accounting documents?)\b",
     "property_measurement_takeoff": r"\b(?:property measurements?|takeoffs?|estimating|estimates?)\b",
     "landscape_concept_design": r"\b(?:landscape design|landscaping designs?|design concepts?)\b",
@@ -72,10 +72,9 @@ CAPABILITY_PATTERNS = {
 }
 
 
-def required_capabilities(job, challenge="", goal=""):
-    """Read all explicit workflows, independently of industry or category."""
-    text = re.sub(r"[-–—]", " ", f"{challenge} {goal}".casefold())
-    caps = []
+def _capability_matches(text):
+    """Prefer specific phrases over matches contained inside them."""
+    matches = []
     for capability, pattern in CAPABILITY_PATTERNS.items():
         for match in re.finditer(pattern, text):
             prefix = re.split(r"[.;!?]|\b(?:but|and)\b", text[:match.start()])[-1]
@@ -84,8 +83,17 @@ def required_capabilities(job, challenge="", goal=""):
                 continue
             if re.match(r"\s+(?:alone\s+)?(?:will not solve|is not needed|isn't needed|not required)\b", suffix):
                 continue
-            caps.append(capability)
-            break
+            matches.append((capability, match))
+    return [(capability, match) for capability, match in matches
+            if not any(other != capability and outer.start() <= match.start()
+                       and match.end() <= outer.end() and outer.span() != match.span()
+                       for other, outer in matches)]
+
+
+def required_capabilities(job, challenge="", goal=""):
+    """Read all explicit workflows, independently of industry or category."""
+    text = re.sub(r"[-–—]", " ", f"{challenge} {goal}".casefold())
+    caps = sorted({capability for capability, _ in _capability_matches(text)})
     if "local_customer_acquisition" in caps and not re.search(r"\b(?:copy|content|campaigns?)\b", text):
         caps = [c for c in caps if c != "marketing_content_generation"]
     if re.search(r"\bforecast(?:ing)?\b", text) and not any("forecast" in c for c in caps):
@@ -110,8 +118,8 @@ def split_requirements(job, challenge="", goal="", explicit_preferred=None):
     essential = required_capabilities(job, challenge, goal)
     preferred = set(explicit_preferred or [])
     for capability in list(essential):
-        matches = list(re.finditer(CAPABILITY_PATTERNS.get(capability, r"(?!)"), text))
-        if matches and all(re.search(r"\b(?:prefer|would like|nice to have|optional|not essential)\b[^.;!?]*$",
+        matches = [match for name, match in _capability_matches(text) if name == capability]
+        if matches and all(re.search(r"\b(?:prefer|would like|nice to have|optional|not essential)\b(?:(?!\b(?:need|require|must)\b)[^.;!?])*$",
                                     text[max(0, m.start()-70):m.start()]) for m in matches):
             essential.remove(capability)
             preferred.add(capability)

@@ -254,6 +254,30 @@ def _profile_changed(state, before, message):
     return True
 
 
+def _conversation_control(message):
+    """Keep questions and conversation repairs out of questionnaire answers."""
+    text = message.strip().replace("’", "'")
+    directive = re.search(r"\b(?:i|we)\s+(?:(?:also|only|now|really)\s+)*(?:need|want|require|choose|select)\b|\b(?:add|remove|cancel|replace|keep|originally asked for)\b", text, re.I)
+    question = "?" in text or re.match(r"^(?:(?:can|could|may|should|would)\s+(?:i|we|you)\b|(?:do|does|did|is|are)\s+|(?:what|why|how)\s+(?:is|are|do|does|can|should|would|about)\b)", text, re.I)
+    if question:
+        if re.search(r"\b(?:can|could) you show me\b", text, re.I):
+            return None
+        return True, "You can include multiple needs. Which needs would you like me to use?"
+    repair = re.search(r"\b(?:you|vee)\b.{0,55}\b(?:assumed|guessed|misunderstood|misread|picked|chose)\b|\b(?:haven't|have not|didn't|did not|not yet)\s+(?:picked|chosen|selected|decided|answered)\b|\b(?:that's|that is)\s+(?:wrong|not what)\b", text, re.I)
+    if (repair and not directive) or re.fullmatch(r"(?:ok|okay|thanks|thank you|got it|yes|no)[.! ]*", text, re.I):
+        return False, "I haven't selected any new needs. Please tell me which needs you want to keep."
+    return None
+
+
+def _requirement_identity(text):
+    """Use shared capability IDs, then normalized wording for unknown needs."""
+    caps = set(required_capabilities(None, text))
+    if caps:
+        return caps
+    normalized = re.sub(r"\b(?:i|we|also|only|need|want|require|help|with|my|our|the|please|for|remove|cancel|keep|add)\b", " ", text.casefold())
+    return {"unresolved:" + " ".join(re.findall(r"[a-z0-9]+", normalized))}
+
+
 def _update_profile(state, message, business_types, comfort_options, budget_cap,
                     ai_job_from_text, job_from_text):
     """Apply every change in one turn to the existing authoritative answers."""
@@ -262,6 +286,11 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
     before = {k: v for k, v in a.items() if k not in {"revision", "evidence"}}
     stage = state["stage"]
     text = message.strip().replace("’", "'")
+    control = _conversation_control(text)
+    if control:
+        return {"changed": False, "budget_edit": False, "ambiguous_budget": False,
+                "clarification": control[1] if stage != "done" or not control[0] else None}
+    clarification = None
     budget_edit = False
     ambiguous = False
     # Scope intent to clauses so a simultaneous needs edit cannot swallow a budget edit.
@@ -296,10 +325,10 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
         a["name"] = name
     a.update(_purchasing_details(text))
 
-    intent = re.search(r"\b(?:i|we)\s+(?:(?:also|actually|now|really|only)\s+)*(?:need|want|require)\b|\b(?:add|remove|drop|forget|replace|instead|i meant|cancel|not|prefer|optional|no longer|don't need|do not need)\b", text, re.I)
+    intent = re.search(r"\b(?:i|we)\s+(?:(?:also|actually|now|really|only)\s+)*(?:need|want|require|choose|select)\b|\b(?:add|remove|drop|forget|replace|instead|i meant|cancel|not|originally asked for|show me|i mean|clarify|specifically|prefer|optional|no longer|don't need|do not need)\b", text, re.I)
     problem_turn = stage in {"challenge", "goal"} and not _is_greeting(text) and (not budget_edit or bool(required_capabilities(None, text)))
     problem_turn = problem_turn or bool(_explicit_challenge(text)) or bool(_explicit_goal(text))
-    if (problem_turn or intent) and "?" not in text:
+    if (problem_turn or intent) and ("?" not in text or re.search(r"\b(?:can|could) you show me\b", text, re.I)):
         required = set(a["essential_capabilities"])
         optional = set(a["optional_capabilities"])
         unresolved = list(a["unresolved_requirements"])
@@ -326,8 +355,20 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
         context_caps = required_capabilities(None, text)
         removing = False
         concrete_refinement = False
+        selecting = (stage == "goal" or bool(re.search(r"\b(?:choose|select)\b", text, re.I))) and not re.search(r"\b(?:also|in addition|as well as)\b", text, re.I)
+        if selecting and required_capabilities(None, text):
+            # Keep mandatory restrictions when replacing pending suggestions.
+            unresolved = [u for u in unresolved if _hard_requirements(u)]
+        clarifying = bool(re.search(r"\bi mean(?:t)?\b|\bclarif\w*\b|\bspecifically\b", text, re.I))
+        if clarifying and required_capabilities(None, text) and unresolved:
+            if len(unresolved) == 1:
+                unresolved.clear()
+            else:
+                clarification = "Which saved need are you clarifying? " + "; ".join(unresolved)
         for piece in pieces:
             piece = piece.strip(" ,")
+            if _conversation_control(piece):
+                continue
             if piece.casefold() in {"but", ";", ".", "!", "?"}:
                 removing = False
                 continue
@@ -350,11 +391,20 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
             parse_text = re.sub(suffix, "", piece, flags=re.I)
             parse_text = re.sub(removal, "", parse_text, flags=re.I)
             if negative:
-                removed = re.sub(r"^\s*(?:i|we)\s+", "", parse_text, flags=re.I).strip().casefold()
                 hard_removed = _hard_requirements(parse_text)
-                unresolved = [u for u in unresolved if not (removed and removed in u.casefold())
-                              and u not in hard_removed]
+                target_ids = _requirement_identity(parse_text)
+                matching = [u for u in unresolved if _requirement_identity(u) <= target_ids or u in hard_removed]
+                if not matching and not (target_ids & (required | optional)):
+                    if any(identity.startswith("unresolved:") for identity in target_ids):
+                        saved = unresolved + [cap.replace("_", " ") for cap in sorted(required | optional)]
+                        clarification = "Which saved need should I remove? " + "; ".join(saved)
+                    else:
+                        clarification = "That requirement isn't currently saved. I haven't removed any other needs."
+                unresolved = [u for u in unresolved if u not in matching]
             caps, prefs = split_requirements(None, parse_text)
+            if not negative and caps:
+                target_ids = set(caps + prefs)
+                unresolved = [u for u in unresolved if not (_requirement_identity(u) <= target_ids)]
             if re.fullmatch(r"(?:advanced )?forecast(?:ing)?", parse_text, re.I):
                 caps = [c for c in context_caps if "forecast" in c]
             if re.search(r"\bswaps?\b", parse_text, re.I) and "employee_scheduling" in required:
@@ -416,7 +466,7 @@ def _update_profile(state, message, business_types, comfort_options, budget_cap,
                     active += "; needs clarification: " + "; ".join(unresolved)
                 a["challenge"] = a["goal"] = active
     changed = _profile_changed(state, before, message)
-    return {"changed": changed, "budget_edit": budget_edit, "ambiguous_budget": ambiguous}
+    return {"changed": changed, "budget_edit": budget_edit, "ambiguous_budget": ambiguous, "clarification": clarification}
 
 
 def _next_unanswered(current, answers):
@@ -1207,6 +1257,10 @@ def render_vee_chat(
     stage = state["stage"]
     update = _update_profile(state, reply, business_types, comfort_options, budget_cap,
                              ai_job_from_text, job_from_text)
+    if update.get("clarification"):
+        state["messages"].append({"role": "assistant", "content": update["clarification"]})
+        st.rerun()
+        return
     if stage == "done":
         if update["changed"]:
             evaluation = _current_evaluation(state, tools, score_tools, research_tools, evaluate_catalog)
