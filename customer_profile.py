@@ -95,6 +95,7 @@ def interpretation_prompt(profile, stage, business_types, comfort_options):
         "Interpret the latest customer message for Vee. Return ONLY a JSON object with "
         "base_revision (the supplied revision), actions (array), clarification (null or one short question), "
         "questions (array of {text:QUESTION,kind:'pricing'|'comparison'|'general'}). "
+        "Also return requirement_intent: 'exploring', 'editing', or 'confirming'. "
         "Actions: {op:'set',field:FIELD,value:VALUE}; {op:'add',description:TEXT,capabilities:[ID],importance:'essential'|'optional'}; "
         "{op:'update',id:EXISTING_ID,description:TEXT,capabilities:[ID],importance:'essential'|'optional'}; "
         "{op:'remove',id:EXISTING_ID}. Updates fully describe that one need, preserving its ID. "
@@ -102,6 +103,12 @@ def interpretation_prompt(profile, stage, business_types, comfort_options):
         "Only modify information explicitly stated or corrected by the customer. Omitted fields stay unchanged. "
         "Questions, hypothetical scenarios, greetings, thanks and acknowledgments are not new requirements. "
         "A confirmation may accept a specific pending clarification from the assistant, never invent a need. "
+        "Distinguish asking about available choices from selecting specific workflows. Suggestions belong "
+        "to the assistant, not the saved profile. When exploring how many or which priorities to choose, "
+        "set requirement_intent='exploring', make NO requirement actions, offer business-relevant "
+        "suggestions in one clarification and ask which ones the owner wants. Confirmation must identify "
+        "the specific selected choices from a pending question; an ambiguous assent does not select them. "
+        "Explicitly named additions/removals/corrections are editing; do not block those as exploration. "
         "Handle mixed questions and explicit instructions: apply only explicit edits. "
         "Match paraphrases and refinements to existing IDs; do not add duplicates. "
         "Keep related workflow steps in one requirement. Preserve unrelated needs on corrections. "
@@ -195,7 +202,7 @@ def _set_field(profile, field, value, comfort_options, business_types, budget_ca
 def apply_proposal(profile, proposal, *, comfort_options, business_types, budget_cap, message):
     """Validate the complete turn before publishing any customer state."""
     required_keys = {"base_revision", "actions", "clarification"}
-    if not isinstance(proposal, dict) or not required_keys <= set(proposal) or set(proposal) - required_keys - {"questions"}:
+    if not isinstance(proposal, dict) or not required_keys <= set(proposal) or set(proposal) - required_keys - {"questions", "requirement_intent"}:
         raise InvalidProposal("Invalid interpretation envelope")
     proposal_questions(proposal)
     if type(proposal["base_revision"]) is not int or proposal["base_revision"] != profile["revision"]:
@@ -203,6 +210,11 @@ def apply_proposal(profile, proposal, *, comfort_options, business_types, budget
     actions = proposal["actions"]
     if not isinstance(actions, list) or len(actions) > 30:
         raise InvalidProposal("Invalid action list")
+    intent = proposal.get("requirement_intent")
+    if intent is not None and intent not in ("exploring", "editing", "confirming"):
+        raise InvalidProposal("Invalid requirement intent")
+    if intent == "exploring" and any(isinstance(a, dict) and a.get("op") != "set" for a in actions):
+        raise InvalidProposal("Exploration cannot save suggested requirements")
     clarification = proposal["clarification"]
     if clarification is not None:
         clarification = _text(clarification, 500)

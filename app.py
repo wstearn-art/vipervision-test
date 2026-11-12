@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from vee_chat import render_vee_chat, _call_ai, _current_evaluation
+from advisor_context import (evidence_conflicts, display_text, review_roi_scope,
+                             roi_review_key, roi_snapshot, monthly_cost_label)
 from recommendation_engine import (
     evaluate_tool as engine_evaluate_tool, load_plan_catalog,
     research_leads as engine_research_leads, score_tools as engine_score_tools,
@@ -203,8 +205,10 @@ def find_research_leads(data, job, cap, comfort, requirements=None):
 
 
 def plan_summary(tool_name):
-    return "; ".join(f"{row['plan_name']}: {plan_price_summary(row)}"
-                     for row in tool_plans if row["tool_name"] == tool_name)
+    summary = "; ".join(f"{row['plan_name']}: {plan_price_summary(row)}"
+                        for row in tool_plans if row["tool_name"] == tool_name)
+    return summary + (". " + evidence_conflicts(tool_plans)[tool_name]
+                      if tool_name in evidence_conflicts(tool_plans) else "")
 
 
 @st.cache_data
@@ -448,6 +452,7 @@ st.markdown("<div id='top'></div>", unsafe_allow_html=True)
 
 # Home page: everything except the catalog
 def home_page():
+    st.session_state["vee_plan_catalog"] = tool_plans
     # Header box with a glowing pulse line on each side
     PULSE_LEFT = (
         '<svg class="pulse-wave pulse-wave-left" width="140" height="38" viewBox="0 0 300 80" style="width: 140px; height: 38px; flex: 0 0 140px;" aria-hidden="true"><defs><filter id="wave-glow-left" x="-10%" y="-60%" width="120%" height="220%"><feGaussianBlur stdDeviation="3"></feGaussianBlur></filter></defs><path d="M 0 40 H 70 C 78 40 80 28 86 28 C 93 28 94 56 101 56 C 108 56 109 22 117 22 C 124 22 124 48 131 48 C 136 48 137 36 142 36 C 147 36 148 46 153 46 C 158 46 159 30 165 30 C 172 30 172 58 180 58 C 187 58 189 18 197 18 C 205 18 206 52 214 52 C 220 52 222 40 230 40 H 300" fill="none" stroke="#39FF88" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.6" filter="url(#wave-glow-left)"></path><path d="M 0 40 H 70 C 78 40 80 28 86 28 C 93 28 94 56 101 56 C 108 56 109 22 117 22 C 124 22 124 48 131 48 C 136 48 137 36 142 36 C 147 36 148 46 153 46 C 158 46 159 30 165 30 C 172 30 172 58 180 58 C 187 58 189 18 197 18 C 205 18 206 52 214 52 C 220 52 222 40 230 40 H 300" fill="none" stroke="#39FF88" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>'
@@ -506,13 +511,15 @@ def home_page():
                 recommended = st.session_state.get("vee_roi_candidates", [])
                 price_choices = ["Enter my own cost"] + [item["name"] for item in recommended]
                 default_choice = 1 if recommended else 0
+                if st.session_state.get("roi_tool_choice") not in price_choices:
+                    st.session_state.pop("roi_tool_choice", None)
                 chosen = st.selectbox("Tool to evaluate", price_choices,
                                       index=default_choice, key="roi_tool_choice")
                 selected = next((item for item in recommended if item["name"] == chosen), None)
                 cost_known = bool(selected and selected["cost"] is not None)
                 if cost_known:
                     tool_price = float(selected["cost"])
-                    st.write("**Catalog plan cost for known requirements:** " + md(f"${tool_price:,.2f}/month"))
+                    st.write("**Catalog plan cost for known requirements:** " + md(monthly_cost_label(tool_price, selected.get("billing_term", ""))))
                     if selected.get("plan"):
                         st.caption("Assessed plan: " + selected["plan"])
                     st.caption(selected["note"])
@@ -536,6 +543,18 @@ def home_page():
                     if not cost_known:
                         st.info("Net savings and break-even will appear once you confirm an estimated total cost.")
 
+                selection = selected or {"name": chosen, "plan": "Owner's cost scenario", "cost_widget_key": custom_key,
+                                         "profile_revision": vee_state["answers"]["revision"],
+                                         "covered_capabilities": vee_state["answers"].get("essential_capabilities", []),
+                                         "unresolved_requirements": vee_state["answers"].get("unresolved_requirements", [])}
+                scope = review_roi_scope(st.session_state, selection)
+                if scope["needs_review"]:
+                    st.warning("The selected plan or workflow coverage changed, or some required work is unsupported. "
+                               "Review the hours and time saving below for covered work only, then confirm them.")
+                    if st.checkbox("I reviewed these assumptions for the current plan's covered work",
+                                   key=roi_review_key(scope)):
+                        scope["needs_review"] = False
+
                 c1, c2 = st.columns(2)
                 with c1:
                     hours = st.number_input("Hours spent on this task each week",
@@ -549,23 +568,25 @@ def home_page():
                                           key="roi_reduction")
                     st.caption("An assumption to test—not a measured AI performance claim.")
 
-                monthly_time_value = hours * value * 4.33
-                estimated_savings = monthly_time_value * reduction / 100
-                estimated_net = estimated_savings - tool_price if cost_known else None
+                snapshot = roi_snapshot(selection, hours, value, reduction, tool_price, cost_known, scope["needs_review"])
+                st.session_state["vee_roi_snapshot"] = snapshot
+                monthly_time_value = snapshot["monthly_time_value"]
+                estimated_savings = snapshot["monthly_savings"]
+                estimated_net = snapshot["monthly_net"]
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Time value/month", money(monthly_time_value))
                 with m2:
-                    st.metric("Potential savings/month", money(estimated_savings))
+                    st.metric("Potential savings/month", money(estimated_savings) if estimated_savings is not None else "Review assumptions")
                 with m3:
-                    st.metric("Estimated net/month", money(estimated_net) if cost_known else "Not yet calculated")
-                if cost_known and tool_price > 0 and monthly_time_value > 0:
+                    st.metric("Estimated net/month", money(estimated_net) if estimated_net is not None else "Not yet calculated")
+                if estimated_net is not None and tool_price > 0 and monthly_time_value > 0:
                     needed = tool_price / monthly_time_value * 100
                     if needed <= 100:
                         st.caption(f"Break-even requires about {needed:.0f}% time savings at these inputs.")
                     else:
                         st.warning("This tool's modeled cost exceeds the full monthly value of the task.")
-                if cost_known and estimated_net < 0:
+                if estimated_net is not None and estimated_net < 0:
                     st.warning("At these assumptions, costs exceed estimated time savings.")
                 if not cost_known:
                     st.caption("Potential savings exclude software costs; this is NOT a net ROI estimate.")
@@ -1023,7 +1044,7 @@ def catalog_page():
             decisions = {str(item["tool"]["tool_name"]): item for item in evaluation["all"]}
             compare["Fit classification"] = compare["Tool"].map(lambda name: decisions[name]["fit_classification"])
             compare["Assessed plan"] = compare["Tool"].map(lambda name: decisions[name]["plan"])
-            compare["Profile cost assessment"] = compare["Tool"].map(lambda name: decisions[name]["reason"])
+            compare["Profile cost assessment"] = compare["Tool"].map(lambda name: display_text(decisions[name]["reason"]))
         show_table(compare)
         if len(picked) == 1:
             st.info("Pick one or two more tools to compare them side by side.")
