@@ -1,17 +1,18 @@
 import re
+from datetime import date
 from html import escape
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from vee_chat import render_vee_chat, _call_ai, _current_evaluation
+from vee_chat import render_vee_chat, _current_evaluation
 from advisor_context import (evidence_conflicts, display_text, roi_state, roi_calculation,
                              restore_roi_widgets, save_roi_widget, confirm_roi,
                              roi_review_key, monthly_cost_label)
 from recommendation_engine import (
-    evaluate_tool as engine_evaluate_tool, load_plan_catalog,
-    research_leads as engine_research_leads, score_tools as engine_score_tools,
-    profile_capabilities, plan_price_summary, evaluate_catalog as engine_evaluate_catalog,
+    load_catalog, CATALOG_CODE_REVISION,
+    score_tools as engine_score_tools,
+    plan_price_summary, evaluate_catalog as engine_evaluate_catalog,
 )
 st.set_page_config(
     page_title="VipervisionAI | Find the right AI tool",
@@ -25,21 +26,6 @@ PLAN_FILE = BASE_DIR / "tool_plans.csv"
 VEE_FILE = BASE_DIR / "vee.png"
 EXPECTED_TOOL_COUNT = 22
 PRICE_CHECK_DATE = "Nov 6, 2026"  # replaced by the newest checked_date in the catalog.
-
-REQUIRED_COLUMNS = [
-    "tool_name",
-    "business_type",
-    "challenge",
-    "free_price",
-    "monthly_cost",
-    "price_note",
-    "effort",
-    "pros",
-    "cons",
-    "website",
-    "source",
-    "checked_date",
-]
 
 BUDGET_CAP = {
     "Free only": 0,
@@ -62,42 +48,7 @@ JOBS = [
     "Landscape Design",
 ]
 
-# Plain words that map typed text in the chat helper to one catalog job.
-JOB_WORDS = {
-    "Reviews": ["review", "reviews", "rating", "ratings", "reputation", "stars"],
-    "Customer Questions": [
-        "question", "questions", "inbox", "message", "messages", "texts", "calls", "phone", "caller",
-        "chatbot", "answer", "answers", "inquiries",
-    ],
-    "Social media": [
-        "social", "instagram", "facebook", "tiktok", "post", "posts",
-        "flyer", "flyers", "design", "graphics",
-    ],
-    "Marketing": [
-        "marketing", "email", "emails", "newsletter", "campaign",
-        "campaigns", "promotion", "promotions", "loyalty",
-    ],
-    "Bookings": [
-        "booking", "bookings", "book", "reservation", "reservations",
-        "tables", "appointment", "appointments",
-    ],
-    "Daily operations": [
-        "pos", "orders", "ordering", "payments", "register", "checkout",
-        "operations", "sales",
-    ],
-    "Scheduling": [
-        "schedule", "schedules", "scheduling", "shifts", "staff",
-        "employees", "timesheets", "hours",
-    ],
-    "Accounting": [
-        "accounting", "bookkeeping", "taxes", "invoices", "expenses", "books",
-    ],
-    "Estimating": ["estimate", "estimates", "estimating", "quote", "quotes", "measurements", "measure", "acreage", "takeoff", "takeoffs"],
-    "Landscape Design": ["landscape", "landscaping", "garden", "gardens", "yard", "yards", "visualize", "renderings"],
-}
 
-BUSINESS_TYPES = ["Restaurant / Cafe", "Coffee Shop", "Landscaping"]
-BUDGET_OPTIONS = list(BUDGET_CAP)
 COMFORT_OPTIONS = ["Keep it simple", "I can learn a bit"]
 
 # The team fills these in before the final. Lines show only when text is added.
@@ -129,39 +80,20 @@ def show_table(data):
 
 @st.cache_data
 def load_tools(path, catalog_revision=None):
-    data = pd.read_csv(path)
-    missing = [column for column in REQUIRED_COLUMNS if column not in data.columns]
-    if missing:
-        raise ValueError("The catalog is missing required columns: " + ", ".join(missing))
-    data = data.copy()
-    data["free_price"] = pd.to_numeric(data["free_price"], errors="coerce")
-    data["monthly_cost"] = pd.to_numeric(data["monthly_cost"], errors="coerce")
-    data["business_type"] = data["business_type"].fillna("")
-    data["challenge"] = data["challenge"].fillna("").astype(str).str.strip()
-    data["effort"] = data["effort"].fillna("").astype(str).str.strip()
-    if data["tool_name"].isna().any() or data["tool_name"].duplicated().any():
-        raise ValueError("Every catalog tool must have one unique name.")
-    return data
+    return load_catalog(path, PLAN_FILE)
 
 try:
-    tools = load_tools(DATA_FILE, (DATA_FILE.stat().st_mtime_ns, DATA_FILE.stat().st_size))
+    tools, tool_plans = load_tools(DATA_FILE, (DATA_FILE.read_bytes(), PLAN_FILE.read_bytes(), date.today().isoformat(), CATALOG_CODE_REVISION))
 except (FileNotFoundError, pd.errors.ParserError, ValueError) as error:
-    st.error("The tool catalog could not be loaded. Check ai_tools.csv and try again.")
+    st.error("The catalog could not be loaded. Check ai_tools.csv and tool_plans.csv and try again.")
     st.caption(str(error))
     st.stop()
 
 newest_check = pd.to_datetime(tools["checked_date"], errors="coerce").max()
+BUSINESS_TYPES = list(dict.fromkeys(tag.strip() for tags in tools['industry_tags']
+                                  for tag in tags.split(';') if tag.strip()))
 if pd.notna(newest_check):
     PRICE_CHECK_DATE = date_label(newest_check)
-
-try:
-    tool_plans = load_plan_catalog(PLAN_FILE)
-    if {row["tool_name"] for row in tool_plans} != set(tools["tool_name"]):
-        raise ValueError("Every catalog tool must have plan-level data.")
-except (FileNotFoundError, ValueError) as error:
-    st.error("The plan catalog could not be loaded. Check tool_plans.csv and try again.")
-    st.caption(str(error))
-    st.stop()
 
 if len(tools) < EXPECTED_TOOL_COUNT:
     st.warning(
@@ -171,17 +103,11 @@ if len(tools) < EXPECTED_TOOL_COUNT:
 
 def business_tools(data, business_type):
     """Return tools whose catalog business type includes the selected type."""
-    return data[
-        data["business_type"].apply(
-            lambda value: business_type in [part.strip() for part in str(value).split(",")]
-        )
-    ].copy()
+    field = 'industry_tags' if 'industry_tags' in data else 'business_type'
+    separator = ';' if field == 'industry_tags' else ','
+    return data[data[field].apply(
+        lambda value: business_type in [part.strip() for part in str(value).split(separator)])].copy()
 
-def evaluate_plan_cost(tool, requirements=None):
-    """Evaluate the lowest evidence-backed plan that covers required capabilities."""
-    req = dict(requirements or {})
-    required, preferred = profile_capabilities(req, req.get("job"))
-    return engine_evaluate_tool(tool, tool_plans, req, required, preferred)
 
 
 def evaluate_catalog(data, requirements):
@@ -197,39 +123,43 @@ def score_tools(data, job, cap, comfort, requirements=None):
     return engine_score_tools(data, job, cap, comfort, req, tool_plans)
 
 
-def find_research_leads(data, job, cap, comfort, requirements=None):
-    req = dict(requirements or {})
-    req.setdefault("challenge", "")
-    req.setdefault("goal", "")
-    req.setdefault("employees", None)
-    return engine_research_leads(data, job, cap, comfort, req, tool_plans)
-
-
-def plan_summary(tool_name):
-    summary = "; ".join(f"{row['plan_name']}: {plan_price_summary(row)}"
-                        for row in tool_plans if row["tool_name"] == tool_name)
-    return summary + (". " + evidence_conflicts(tool_plans)[tool_name]
-                      if tool_name in evidence_conflicts(tool_plans) else "")
 
 
 @st.cache_data
-def run_scorer_checks(data):
+def catalog_summaries(catalog_revision, _plans):
+    plans = _plans
+    conflicts=evidence_conflicts(plans)
+    summaries={}
+    for row in plans:
+        summaries.setdefault(row['tool_name'],[]).append(row['plan_name']+': '+plan_price_summary(row))
+    return {name:'; '.join(values)+('. '+conflicts[name] if name in conflicts else '') for name,values in summaries.items()}
+
+
+_catalog_summaries = catalog_summaries(tools.attrs.get('catalog_revision'), tool_plans)
+
+
+def plan_summary(tool_name):
+    return _catalog_summaries.get(tool_name, '')
+
+
+@st.cache_data
+def run_scorer_checks(data, catalog_revision=None):
     """Check fit classes, affordability gates, ordering, and explanations."""
     total = 0
     passed = 0
     for job in JOBS:
         for cap in BUDGET_CAP.values():
-            for comfort in COMFORT_OPTIONS:
-                ranked = score_tools(data, job, cap, comfort)
-                classes = [item["fit_classification"] for item in ranked]
-                ok = (
-                    all(label in {"Strong Fit", "Partial Fit"} for label in classes)
-                    and classes == sorted(classes, key=lambda label: 0 if label == "Strong Fit" else 1)
-                    and all(item["pricing"]["status"] == "confirmed" for item in ranked)
-                    and all(item["reasons"] for item in ranked)
-                )
-                total += 1
-                passed += int(ok)
+            # Comfort affects conversational presentation, not deterministic fit.
+            ranked = score_tools(data, job, cap, COMFORT_OPTIONS[0])
+            classes = [item["fit_classification"] for item in ranked]
+            ok = (
+                all(label in {"Strong Fit", "Partial Fit"} for label in classes)
+                and classes == sorted(classes, key=lambda label: 0 if label == "Strong Fit" else 1)
+                and all(item["pricing"]["status"] == "confirmed" for item in ranked)
+                and all(item["reasons"] for item in ranked)
+            )
+            total += 1
+            passed += int(ok)
     return passed, total
 
 def vee_avatar():
@@ -241,28 +171,7 @@ def show_tool_link(url, name=None):
     st.markdown(f"[{label}]({url})")
 
 # This is the AI integration 
-def ai_job_from_text(text):
-    """Classify a problem with the same Luna-then-mini fallback as the chat."""
-    if not text.strip():
-        return None
-    # Keep category names tied to the researched catalog.
-    system = ("Classify this small-business problem into exactly one category: "
-              + ", ".join(JOBS) + ". Respond with only the category name.")
-    answer = _call_ai(system, [{"role": "user", "content": text}], max_tokens=80)
-    category = answer.strip() if answer else None
-    return category if category in JOBS else None
 
-def job_from_text(text):
-    """Pick the job whose plain words appear most often in the typed text."""
-    words = set(re.findall(r"[a-z]+", text.lower()))
-    best_job = None
-    best_hits = 0
-    for job in JOBS:
-        hits = len(words & set(JOB_WORDS[job]))
-        if hits > best_hits:
-            best_job = job
-            best_hits = hits
-    return best_job
 
 # The three explore cards. Tool names and counts come straight from the catalog.
 EXPLORE_CARDS = [
@@ -488,18 +397,12 @@ def home_page():
             # Yellow ombre box around the Chat with Vee area
             with st.container(key="vee_chat_box"):
                 render_vee_chat(
-                    business_tools=business_tools,
                 tools=tools,
                 business_types=BUSINESS_TYPES,
                 budget_cap=BUDGET_CAP,
                 comfort_options=COMFORT_OPTIONS,
-                score_tools=score_tools,
-                evaluate_plan_cost=evaluate_plan_cost,
                 evaluate_catalog=evaluate_catalog,
-                ai_job_from_text=ai_job_from_text,
-                job_from_text=job_from_text,
                 vee_avatar=vee_avatar,
-                research_tools=find_research_leads,
             )
 
         # Once the first chat with Vee is done, the ROI calculator shows right under it
@@ -916,7 +819,7 @@ def about_page():
             dates_ok = bool(pd.to_datetime(tools["checked_date"], errors="coerce").notna().all())
             sources_ok = bool(tools["source"].notna().all())
             jobs_ok = bool(tools["challenge"].isin(JOBS).all())
-            passed, total = run_scorer_checks(tools)
+            passed, total = run_scorer_checks(tools, tools.attrs.get('catalog_revision'))
             checks = [
                 (f"The catalog has {EXPECTED_TOOL_COUNT} tools", len(tools) == EXPECTED_TOOL_COUNT),
                 ("Every tool name is unique", not tools["tool_name"].duplicated().any()),
@@ -943,8 +846,6 @@ def about_page():
 # Catalog page: the full list of tools on its own page
 def has_free_starting_plan(tool):
     """A free entry plan does not imply the required AI feature is free."""
-    if str(tool.get("tool_name", "")).casefold() == "7shifts":
-        return "comp free" in str(tool.get("price_note", "")).casefold()
     value = tool.get("free_price")
     return pd.notna(value) and float(value) == 0
 
@@ -961,14 +862,14 @@ def catalog_page():
     )
     catalog_col1, catalog_col2, catalog_col3 = st.columns([1, 1, 1])
     with catalog_col1:
-        job_filter = st.selectbox("Filter by job", ["All"] + sorted(tools["challenge"].unique()))
+        job_filter = st.selectbox("Filter by job", ["All"] + sorted({tag.strip() for tags in tools['challenge'] for tag in tags.split(';') if tag.strip()}))
     with catalog_col2:
         business_filter = st.selectbox("Filter by business", ["All"] + BUSINESS_TYPES)
     with catalog_col3:
         free_only = st.checkbox("Show only tools with a free starting option")
     shown = tools.copy()
     if job_filter != "All":
-        shown = shown[shown["challenge"] == job_filter]
+        shown = shown[shown['challenge'].apply(lambda value: job_filter in [tag.strip() for tag in value.split(';')])]
     if business_filter != "All":
         shown = business_tools(shown, business_filter)
     if free_only:
@@ -1040,7 +941,7 @@ def catalog_page():
         )
         state = st.session_state.get("vee_guided", {})
         if state.get("stage") == "done":
-            evaluation = _current_evaluation(state, tools, score_tools, find_research_leads, evaluate_catalog)
+            evaluation = _current_evaluation(state, tools, evaluate_catalog)
             decisions = {str(item["tool"]["tool_name"]): item for item in evaluation["all"]}
             compare["Fit classification"] = compare["Tool"].map(lambda name: decisions[name]["fit_classification"])
             compare["Assessed plan"] = compare["Tool"].map(lambda name: decisions[name]["plan"])
