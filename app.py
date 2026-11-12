@@ -5,8 +5,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from vee_chat import render_vee_chat, _call_ai, _current_evaluation
-from advisor_context import (evidence_conflicts, display_text, review_roi_scope,
-                             roi_review_key, roi_snapshot, monthly_cost_label)
+from advisor_context import (evidence_conflicts, display_text, roi_state, roi_calculation,
+                             restore_roi_widgets, save_roi_widget, confirm_roi,
+                             roi_review_key, monthly_cost_label)
 from recommendation_engine import (
     evaluate_tool as engine_evaluate_tool, load_plan_catalog,
     research_leads as engine_research_leads, score_tools as engine_score_tools,
@@ -510,11 +511,12 @@ def home_page():
 
                 recommended = st.session_state.get("vee_roi_candidates", [])
                 price_choices = ["Enter my own cost"] + [item["name"] for item in recommended]
-                default_choice = 1 if recommended else 0
-                if st.session_state.get("roi_tool_choice") not in price_choices:
-                    st.session_state.pop("roi_tool_choice", None)
+                snapshot = roi_calculation(st.session_state, recommended, vee_state["answers"])
+                model = roi_state(st.session_state)
+                restore_roi_widgets(st.session_state)
                 chosen = st.selectbox("Tool to evaluate", price_choices,
-                                      index=default_choice, key="roi_tool_choice")
+                                      key="roi_tool_choice", on_change=save_roi_widget,
+                                      args=(st.session_state, "choice"))
                 selected = next((item for item in recommended if item["name"] == chosen), None)
                 cost_known = bool(selected and selected["cost"] is not None)
                 if cost_known:
@@ -527,48 +529,46 @@ def home_page():
                 else:
                     # Unknown is not zero. Explicit owner confirmation is necessary
                     # before calculating a net estimate, even if the entered value is $0.
-                    profile = vee_state.get("answers", {})
-                    custom_key = "roi_custom_" + repr((chosen, profile.get("revision", 0), profile.get("budget_amount"),
-                        profile.get("employees"), profile.get("challenge"), profile.get("goal")))
                     tool_price = float(st.number_input(
                         "Estimated TOTAL monthly tool cost ($)", min_value=0.0,
-                        max_value=100000.0, value=0.0, step=5.0,
-                        key=custom_key))
+                        max_value=100000.0, step=5.0,
+                        key="roi_custom_cost", on_change=save_roi_widget,
+                        args=(st.session_state, "custom_cost")))
                     cost_known = st.checkbox(
                         "Use this amount as my own scenario assumption",
-                        value=False, key=custom_key + "_confirmed")
+                        key="roi_custom_confirmed", on_change=save_roi_widget,
+                        args=(st.session_state, "custom_cost_confirmed"))
                     if selected:
                         st.warning(selected.get("eligibility_warning") or
                                    "Total price isn't confirmed. Include seats, usage and required subscriptions.")
                     if not cost_known:
                         st.info("Net savings and break-even will appear once you confirm an estimated total cost.")
 
-                selection = selected or {"name": chosen, "plan": "Owner's cost scenario", "cost_widget_key": custom_key,
-                                         "profile_revision": vee_state["answers"]["revision"],
-                                         "covered_capabilities": vee_state["answers"].get("essential_capabilities", []),
-                                         "unresolved_requirements": vee_state["answers"].get("unresolved_requirements", [])}
-                scope = review_roi_scope(st.session_state, selection)
-                if scope["needs_review"]:
-                    st.warning("The selected plan or workflow coverage changed, or some required work is unsupported. "
-                               "Review the hours and time saving below for covered work only, then confirm them.")
-                    if st.checkbox("I reviewed these assumptions for the current plan's covered work",
-                                   key=roi_review_key(scope)):
-                        scope["needs_review"] = False
+                if snapshot["needs_assumption_review"]:
+                    st.warning("Review the calculator inputs for the current plan and covered work, "
+                               "then confirm these assumptions. Exclude unsupported work.")
+                    review_key = roi_review_key(model)
+                    st.checkbox("I reviewed these assumptions for the current plan's covered work",
+                                key=review_key, on_change=confirm_roi,
+                                args=(st.session_state, model["signature"], review_key))
 
                 c1, c2 = st.columns(2)
                 with c1:
                     hours = st.number_input("Hours spent on this task each week",
                                             min_value=0.0, max_value=168.0,
-                                            value=5.0, step=0.5, key="roi_hours")
+                                            step=0.5, key="roi_hours", on_change=save_roi_widget,
+                                            args=(st.session_state, "weekly_hours"))
                     value = st.number_input("Hourly value of that work ($)",
                                             min_value=0.0, max_value=10000.0,
-                                            value=25.0, step=5.0, key="roi_hourly")
+                                            step=5.0, key="roi_hourly", on_change=save_roi_widget,
+                                            args=(st.session_state, "hourly_value"))
                 with c2:
-                    reduction = st.slider("Estimated time saved (%)", 0, 100, 30,
-                                          key="roi_reduction")
+                    reduction = st.slider("Estimated time saved (%)", 0, 100,
+                                          key="roi_reduction", on_change=save_roi_widget,
+                                          args=(st.session_state, "time_reduction_percent"))
                     st.caption("An assumption to test—not a measured AI performance claim.")
 
-                snapshot = roi_snapshot(selection, hours, value, reduction, tool_price, cost_known, scope["needs_review"])
+                model["rendered"] = True
                 st.session_state["vee_roi_snapshot"] = snapshot
                 monthly_time_value = snapshot["monthly_time_value"]
                 estimated_savings = snapshot["monthly_savings"]

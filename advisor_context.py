@@ -1,6 +1,7 @@
 """Shared display evidence and calculator state; never changes catalog eligibility."""
 import hashlib
 import json
+import math
 from urllib.parse import urlparse
 
 
@@ -105,16 +106,115 @@ def roi_candidate(entry, revision):
     }
 
 
-def review_roi_scope(session, selected):
-    """Keep numeric inputs; require owner review when the selected scope changes."""
-    fields = ("name", "plan", "covered_capabilities", "missing_capabilities", "unresolved_requirements")
-    signature = json.dumps({key: selected.get(key) for key in fields}, sort_keys=True)
-    previous = session.get("vee_roi_scope")
-    if previous is None or previous["signature"] != signature:
-        pending = previous is not None or bool(selected.get("missing_capabilities") or selected.get("unresolved_requirements"))
-        session["vee_roi_scope"] = {"signature": signature, "needs_review": pending,
-                                    "generation": (previous or {}).get("generation", 0) + 1}
-    return session["vee_roi_scope"]
+ROI_WIDGETS = {
+    "choice": "roi_tool_choice", "weekly_hours": "roi_hours", "hourly_value": "roi_hourly",
+    "time_reduction_percent": "roi_reduction", "custom_cost": "roi_custom_cost",
+    "custom_cost_confirmed": "roi_custom_confirmed",
+}
+ROI_DEFAULTS = {"choice": None, "weekly_hours": 5.0, "hourly_value": 25.0,
+                "time_reduction_percent": 30, "custom_cost": 0.0, "custom_cost_confirmed": False}
+ROI_LIMITS = {"weekly_hours": 168, "hourly_value": 10000,
+              "time_reduction_percent": 100, "custom_cost": 100000}
+
+
+def _valid_roi_input(field, value):
+    if field == "choice":
+        return value is None or isinstance(value, str)
+    if field == "custom_cost_confirmed":
+        return type(value) is bool
+    return (type(value) in (int, float) and math.isfinite(value) and 0 <= value <= ROI_LIMITS[field]
+            and (field != "time_reduction_percent" or type(value) is int))
+
+
+def roi_state(session):
+    """Durable scenario inputs, independent of Streamlit's disposable widget keys."""
+    if "vee_roi" not in session:
+        saved = session.get("vee_roi_snapshot") or {}
+        values = dict(ROI_DEFAULTS)
+        for field, default in values.items():
+            previous = session.get(ROI_WIDGETS[field], saved.get(field, default))
+            if _valid_roi_input(field, previous):
+                values[field] = previous
+        values["choice"] = session.get("roi_tool_choice", saved.get("name", values["choice"]))
+        legacy_cost_key = saved.get("cost_widget_key")
+        if legacy_cost_key:
+            cost = session.get(legacy_cost_key, saved.get("monthly_cost"))
+            if _valid_roi_input("custom_cost", cost):
+                values["custom_cost"] = cost
+                values["custom_cost_confirmed"] = bool(session.get(legacy_cost_key + "_confirmed", cost is not None))
+        session["vee_roi"] = {**values, "signature": None, "approved_signature": None,
+                              "generation": 0, "rendered": bool(saved)}
+        # Legacy approvals did not bind the numeric inputs and cannot be trusted.
+        session.pop("vee_roi_scope", None)
+    return session["vee_roi"]
+
+
+def set_roi_input(session, field, value):
+    if field not in ROI_WIDGETS or not _valid_roi_input(field, value):
+        raise ValueError("Invalid ROI input")
+    model = roi_state(session)
+    if model[field] != value:
+        model[field] = value
+        model["signature"] = model["approved_signature"] = None
+        if field == "custom_cost":
+            model["custom_cost_confirmed"] = False
+
+
+def save_roi_widget(session, field):
+    """One callback for every calculator input; runs before the Streamlit rerun."""
+    set_roi_input(session, field, session[ROI_WIDGETS[field]])
+
+
+def restore_roi_widgets(session):
+    model = roi_state(session)
+    for field, key in ROI_WIDGETS.items():
+        session[key] = model[field]
+
+
+def confirm_roi(session, signature, widget_key=None):
+    model = roi_state(session)
+    if signature is not None and model["signature"] == signature and (widget_key is None or session.get(widget_key)):
+        model["approved_signature"] = signature
+
+
+def roi_calculation(session, candidates, profile):
+    """Resolve current eligibility, exact approval and the single Python calculation."""
+    model = roi_state(session)
+    choices = [c["name"] for c in candidates]
+    if model["choice"] not in ["Enter my own cost"] + choices:
+        set_roi_input(session, "choice", choices[0] if choices else "Enter my own cost")
+    selected = next((c for c in candidates if c["name"] == model["choice"]), None)
+    if selected:
+        selected = dict(selected)
+    else:
+        selected = {"name": "Enter my own cost", "plan": "Owner's cost scenario",
+                    "covered_capabilities": profile.get("essential_capabilities", []),
+                    "unresolved_requirements": profile.get("unresolved_requirements", []),
+                    "fit_classification": "Owner scenario; coverage is not verified"}
+    catalog_known = selected.get("status") == "confirmed" and selected.get("cost") is not None
+    cost = selected["cost"] if catalog_known else model["custom_cost"]
+    known = catalog_known or model["custom_cost_confirmed"]
+    cost_source = "catalog" if catalog_known else "owner_scenario" if known else "unknown"
+    # A confirmed hypothetical amount never changes catalog evidence or fit.
+    selected["cost_source"] = cost_source
+    selected["profile_revision"] = profile.get("revision", 0)
+    # Metadata such as an owner's name or the revision counter alone does not change eligibility.
+    eligibility_fields = ("business", "employees", "budget_amount", "seats", "locations", "channels",
+                          "monthly_usage", "usage_unit", "monthly_billing_only", "prefer_free",
+                          "requirements", "essential_capabilities", "optional_capabilities", "unresolved_requirements")
+    plan_fields = ("name", "plan", "status", "cost", "billing_term", "fit_classification",
+                   "covered_capabilities", "missing_capabilities", "unresolved_requirements")
+    signature = json.dumps({"plan": {k: selected.get(k) for k in plan_fields},
+        "profile": {k: profile.get(k) for k in eligibility_fields},
+        "inputs": {k: model[k] for k in ("weekly_hours", "hourly_value", "time_reduction_percent")},
+        "cost": cost, "cost_known": known, "cost_source": cost_source}, sort_keys=True, separators=(",", ":"))
+    if model["signature"] != signature:
+        model["signature"] = signature
+        model["approved_signature"] = None
+        model["generation"] += 1
+    pending = model["approved_signature"] != signature
+    return roi_snapshot(selected, model["weekly_hours"], model["hourly_value"],
+                        model["time_reduction_percent"], cost, known, pending)
 
 
 def roi_review_key(scope):
@@ -129,5 +229,6 @@ def roi_snapshot(selected, hours, hourly_value, reduction, cost, cost_known, nee
             "time_reduction_percent": reduction, "monthly_time_value": time_value,
             "monthly_savings": savings, "monthly_cost": cost if cost_known else None,
             "monthly_net": savings - cost if cost_known and savings is not None else None,
-            "needs_assumption_review": needs_review, "illustrative_not_measured": True,
+            "needs_assumption_review": needs_review, "assumptions_confirmed": not needs_review,
+            "illustrative_not_measured": True, "available": True,
             "excluded_costs": "onboarding, taxes, unmodeled usage, extra seats and other costs"}

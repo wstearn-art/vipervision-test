@@ -12,7 +12,7 @@ import re
 import requests
 import streamlit as st
 from advisor_context import (capability_label, display_text, team_label, monthly_cost_label, evidence_conflicts,
-                             plan_evidence, roi_candidate, review_roi_scope, roi_snapshot)
+                             plan_evidence, roi_candidate, roi_state, roi_calculation)
 from customer_profile import (InvalidProposal, apply_proposal, ensure_profile,
                               interpretation_prompt, parse_proposal, proposal_questions)
 
@@ -354,28 +354,23 @@ def _roi_note(entry):
 
 
 def _advisor_roi(state):
-    """Read calculator widgets and recheck the chosen tool against current decisions."""
-    saved = st.session_state.get("vee_roi_snapshot")
-    if not saved:
+    """Read the same durable inputs and calculation as the visible calculator."""
+    model = roi_state(st.session_state)
+    if not model["rendered"]:
         return {"available": False, "reason": "Calculator has not been rendered for this conversation."}
-    chosen = st.session_state.get("roi_tool_choice", saved.get("name"))
-    entry = next((item for item in state.get("evaluation", {}).get("all", [])
-                  if str(item["tool"]["tool_name"]) == chosen), None)
-    if not entry:
-        if chosen != "Enter my own cost" or saved.get("name") != chosen or saved.get("profile_revision") != state["answers"]["revision"]:
-            return {"available": False, "reason": "Selection changed; review the calculator after recommendations refresh."}
-        selected = saved
-        cost = st.session_state.get(saved.get("cost_widget_key", ""), saved["monthly_cost"])
-        known = st.session_state.get(saved.get("cost_widget_key", "") + "_confirmed", saved["monthly_cost"] is not None)
-    else:
-        selected = roi_candidate(entry, state["answers"]["revision"])
-        selected["unresolved_requirements"] = state["answers"].get("unresolved_requirements", [])
-        cost, known = selected["cost"], selected["cost"] is not None
-    scope = review_roi_scope(st.session_state, selected)
-    return roi_snapshot(selected, st.session_state.get("roi_hours", saved["weekly_hours"]),
-                        st.session_state.get("roi_hourly", saved["hourly_value"]),
-                        st.session_state.get("roi_reduction", saved["time_reduction_percent"]),
-                        cost, known, scope["needs_review"])
+    evaluated = state.get("evaluation", {}).get("all")
+    if evaluated is None and model["choice"] != "Enter my own cost":
+        return {"available": False, "reason": "Current catalog eligibility has not been assessed."}
+    candidates = []
+    for entry in (evaluated or []):
+        if entry["fit_classification"] not in {"Strong Fit", "Partial Fit"}:
+            continue
+        candidate = roi_candidate(entry, state["answers"]["revision"])
+        candidate["unresolved_requirements"] = state["answers"].get("unresolved_requirements", [])
+        candidates.append(candidate)
+        if len(candidates) == 3:
+            break
+    return roi_calculation(st.session_state, candidates, state["answers"])
 
 
 def _followup(state, user_message, ranked, tools=None):
@@ -825,7 +820,7 @@ def render_vee_chat(
         if st.button("Start a new conversation", key="vee_restart"):
             st.session_state.vee_guided = _state()
             st.session_state.pop("vee_inline_followup", None)
-            for key in ("vee_roi_snapshot", "vee_roi_scope", "roi_tool_choice"):
+            for key in ("vee_roi", "vee_roi_snapshot", "vee_roi_scope", "roi_tool_choice"):
                 st.session_state.pop(key, None)
             st.rerun()
 
