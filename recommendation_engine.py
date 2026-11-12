@@ -279,6 +279,21 @@ def profile_capabilities(req, job=None):
                               req.get("preferred_capabilities"))
 
 
+def _usage_unit(value):
+    """Normalize spelling only; never convert calls to customers or acres to properties."""
+    unit = re.sub(r'[\s_-]+', '_', str(value or '').strip().casefold())
+    aliases = {
+        'measurement':'measurements', 'property_measurement':'measurements',
+        'property_measurements':'measurements', 'unique_customer':'unique_customers',
+        'customers':'unique_customers', 'unique_caller':'unique_customers',
+        'unique_callers':'unique_customers', 'resolved_questions':'outcomes',
+        'unique_calling_customers':'unique_customers',
+        'outcome':'outcomes', 'inquiries':'conversations', 'conversation':'conversations',
+        'property_acre_credit':'property_acre_credits', 'ai_operation':'ai_operations',
+    }
+    return aliases.get(unit, unit)
+
+
 def _plan_cost(plan, req):
     """One additive cost calculation; unknown quantities never become defaults."""
     active=_tags(plan['required_components']); total=Decimal('0'); unknown=[];parts=[]
@@ -295,11 +310,10 @@ def _plan_cost(plan, req):
         total+=Decimal(str(amount))*Decimal(str(quantity))
         parts.append(f"${amount:,.2f}"+(f" × {quantity:g} {QUANTITY_FIELDS[component]}" if component in QUANTITY_FIELDS else ' '+component+' charge'))
     included=_number(plan.get('included_usage'));usage=_number(req.get('monthly_usage'))
-    unit=str(req.get('usage_unit') or '').casefold();plan_unit=str(plan.get('usage_unit') or '').casefold()
-    aliases={'callers':'unique_customers','customers':'unique_customers','resolved_questions':'outcomes','inquiries':'conversations'}
+    unit=_usage_unit(req.get('usage_unit'));plan_unit=_usage_unit(plan.get('usage_unit'))
     quota=plan.get('usage_limit_status','unknown')
     if usage is not None and quota!='not_applicable' and quota!='unlimited':
-        if not unit or not plan_unit or aliases.get(unit,unit)!=aliases.get(plan_unit,plan_unit):
+        if not unit or not plan_unit or unit!=plan_unit:
             unknown.append('requested usage unit is unstated or incompatible with the plan')
         elif quota!='known_limit' or included is None:
             unknown.append('usage limit is not verified')
@@ -325,7 +339,7 @@ def _plan_cost(plan, req):
             component={'seats':'user','locations':'location'}.get(field)
             workforce=field=='employees' and bool(_tags(plan.get('capabilities'))&{
                 'employee_scheduling','shift_swap_management','labor_cost_management','advanced_labor_forecasting'})
-            if quantity is not None and quantity>1 and (component in active or workforce):
+            if quantity is not None and quantity>1 and (field=='seats' or component in active or workforce):
                 unknown.append('plan capacity for multiple '+field+' is unverified')
     term=plan.get('billing_period','unknown')
     if req.get('monthly_billing_only'):

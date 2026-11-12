@@ -910,7 +910,8 @@ def catalog_page():
                     st.write(f"**What to check:** {md(tool['cons'])}")
                     show_tool_link(tool["website"])
                     st.caption(f"Price checked {date_label(tool['checked_date'])}.")
-                    st.markdown(f"[Source details](https://{tool['source']})")
+                    st.markdown(" · ".join(f"[Source details]({url.strip()})"
+                        for url in str(tool['source']).split(';') if url.strip().startswith('https://')))
 
     # Comparison
     st.header("Compare up to three tools")

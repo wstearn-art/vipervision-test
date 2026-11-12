@@ -52,11 +52,9 @@ def _project(profile):
         profile["challenge"] = "; ".join(
             (", ".join(c.replace("_", " ") for c in r["capabilities"]) or r["description"])
             + (" (optional)" if r["importance"] == "optional" else "") for r in needs)
-        # Keep the existing goal stage for needs still awaiting clarification.
-        if not profile["unresolved_requirements"]:
-            profile["goal"] = profile["challenge"]
-        else:
-            profile.pop("goal", None)
+        # An unsupported need is still a stated goal. Assessment must explain the
+        # evidence gap, rather than repeatedly asking the owner to restate it.
+        profile["goal"] = profile["challenge"]
     else:
         if "challenge" in profile:
             profile["challenge"] = profile["goal"] = ""
@@ -265,9 +263,10 @@ def apply_proposal(profile, proposal, *, comfort_options, business_types, budget
         if target in touched:
             raise InvalidProposal("Conflicting actions for one target")
         touched.add(target)
-    mapped = [tuple(r["capabilities"]) for r in updated["requirements"] if r["capabilities"]]
     descriptions = [r["description"].casefold() for r in updated["requirements"]]
-    if len(set(mapped)) != len(mapped) or len(set(descriptions)) != len(descriptions):
+    # Capabilities are broad catalog tags, not requirement identities. Distinct
+    # workflows may share a tag; exact duplicate descriptions still conflict.
+    if len(set(descriptions)) != len(descriptions):
         raise InvalidProposal("Duplicate needs must be reconciled by existing ID")
     _project(updated)
     changed = updated != profile
