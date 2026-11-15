@@ -10,7 +10,7 @@ The application includes Vee, a conversational AI assistant that helps small-bus
 
 Vee collects information about the business, including its challenges, budget, employee count, and technology preferences. This information is used to evaluate products and subscription plans from our researched catalog.
 
-How It Works:
+### How It Works:
 
 
 Business intake: Vee gathers information through a conversation with the user.
@@ -22,7 +22,7 @@ Recommendations: Plans are classified as Strong Fit, Partial Fit, or Research Le
 Next steps: Vee explains the results and can suggest practical ways to address the business problem.
 
 
-Features:
+###Features:
 
 Conversational AI assistant
 
@@ -38,7 +38,6 @@ ROI calculator
 
 Implementation guidance
 
-Data and Research
 
 
 The catalog is stored in two CSV files:
