@@ -40,7 +40,7 @@ Implementation guidance
 
 
 
-The catalog is stored in two CSV files:
+### The catalog is stored in two CSV files:
 
 ai_tools.csv — Product information, descriptions, and research sources.
 
