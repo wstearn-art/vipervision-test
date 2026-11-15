@@ -22,7 +22,7 @@ Recommendations: Plans are classified as Strong Fit, Partial Fit, or Research Le
 Next steps: Vee explains the results and can suggest practical ways to address the business problem.
 
 
-###Features:
+### Features:
 
 Conversational AI assistant
 
@@ -49,7 +49,7 @@ tool_plans.csv — Subscription plans, pricing, supported capabilities, and limi
 Product information is researched using vendor websites and documentation. Pricing and features may change, and not every product has enough available information to qualify as a verified recommendation.
 
 
-About Us:
+### About Us:
 
 Built by The Vipers for the University of Maryland AI for Small Business Hackathon.
 
