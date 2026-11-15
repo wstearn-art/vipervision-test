@@ -55,4 +55,3 @@ Built by The Vipers for the University of Maryland AI for Small Business Hackath
 
 Prices checked Nov 6, 2026
 
-Built by The Vipers for the AI for Small Business Hack-A-Thon. Video due Sun Nov 8, 2026, 11:59 PM ET. Prototype link can improve after that, to the Nov 17 final.
