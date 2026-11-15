@@ -2,7 +2,7 @@
 
 Find the right AI tool for your small business, in minutes.
 
-About the Project:
+### About the Project:
 
 Viper Vision AI was developed by our team for the University of Maryland AI for Small Business Hackathon.
 
